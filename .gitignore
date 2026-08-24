@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime artifacts
+cache/
+journal.db
+model/learned_weights.json
+
+# OS
+.DS_Store
