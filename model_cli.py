@@ -20,6 +20,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from config import SETTINGS
+
 console = Console()
 
 
@@ -28,6 +30,11 @@ def cmd_evaluate(args) -> int:
     from model.pipeline import evaluate
     from model.scorecard import render_candidates, render_setup
 
+    requested_period = args.period or SETTINGS.period
+    effective = nifty.clamp_period(args.interval, requested_period)
+    if effective != requested_period:
+        console.print(f"[yellow]{args.interval} bars: Yahoo only serves "
+                      f"{effective} of history — using that.[/]")
     result = nifty.fetch_history(period=args.period, interval=args.interval)
     chain = None
     try:

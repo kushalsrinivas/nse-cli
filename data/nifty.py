@@ -147,6 +147,11 @@ def fetch_history(
 
     period = period or SETTINGS.period
     interval = interval or SETTINGS.interval
+    clamped = clamp_period(interval, period)
+    if clamped != period:
+        log.info("interval %s caps period at %s (requested %s)",
+                 interval, clamped, period)
+        period = clamped
 
     if period not in VALID_PERIODS:
         raise ValueError(f"period must be one of {VALID_PERIODS}, got {period!r}")
@@ -187,6 +192,29 @@ def fetch_history(
     )
     cache.set(result, "nifty_history", params)
     return result
+
+
+# Yahoo caps intraday history: interval -> furthest period it will serve.
+INTRADAY_PERIOD_LIMITS = {
+    "1m": "5d", "2m": "60d", "5m": "60d", "15m": "60d",
+    "30m": "60d", "90m": "60d", "60m": "730d", "1h": "730d",
+}
+_PERIOD_RANK = {p: i for i, p in enumerate(VALID_PERIODS)}
+
+
+def suggest_period(interval: str) -> str:
+    """Furthest lookback usable for a given bar interval."""
+    return INTRADAY_PERIOD_LIMITS.get(interval, SETTINGS.period)
+
+
+def clamp_period(interval: str, period: str | None) -> str | None:
+    """Shrink `period` to what the interval allows (e.g. 15m → last 60d)."""
+    limit = INTRADAY_PERIOD_LIMITS.get(interval)
+    if not limit or not period:
+        return period
+    if _PERIOD_RANK.get(period, 99) > _PERIOD_RANK.get(limit, -1):
+        return limit
+    return period
 
 
 def summarize(result: HistoryResult, rows: int = 5) -> dict[str, Any]:

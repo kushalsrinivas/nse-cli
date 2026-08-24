@@ -155,6 +155,8 @@ class NiftyTerminal(App):
             holder.update(Text("No data yet…", style="yellow"))
             return
         parts = views.market_view(hist)
+        from ui.chart import candle_panel
+        parts.append(candle_panel(hist))
         parts.append(Panel(views.ohlcv_table(hist),
                            title=f"[bold]Recent OHLCV[/bold] (last {SETTINGS.table_rows})",
                            box=box.ROUNDED))

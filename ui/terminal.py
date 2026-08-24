@@ -230,6 +230,8 @@ def render_dashboard(result: HistoryResult, chain: OptionChain | None,
     top.add_column(ratio=1)
     top.add_row(price_panel(result), stats_panel(result))
     console.print(top)
+    from ui.chart import candle_panel
+    console.print(candle_panel(result))
     console.print(history_table(result))
 
     if chain:
