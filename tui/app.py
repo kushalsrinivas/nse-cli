@@ -260,6 +260,90 @@ class NiftyTerminal(App):
                 out[key] = s.status.strip("▲▼● ")
         return out
 
+    # -- options journaling helpers -------------------------------------------
+
+    def _resolve_expiry(self, token: str) -> str | None:
+        """Expiry token: 1-based index into the chain, ISO date, or unique
+        substring like 'aug'."""
+        chain = self.state.chain
+        if not chain or not chain.expiries:
+            return None
+        if token.isdigit():
+            idx = int(token) - 1
+            return chain.expiries[idx] if 0 <= idx < len(chain.expiries) else None
+        for e in chain.expiries:
+            if e == token:
+                return e
+        matches = [e for e in chain.expiries if token.lower() in e.lower()]
+        return matches[0] if len(matches) == 1 else None
+
+    def _lookup_leg(self, expiry: str, strike: float, opt_type: str):
+        if not self.state.chain:
+            return None
+        for row in self.state.chain.for_expiry(expiry):
+            if abs(row.strike - strike) < 0.51:
+                return row.call if opt_type == "ce" else row.put
+        return None
+
+    def _open_option_trade(self, j, opt_type: str, args: list[str]) -> str:
+        from datetime import datetime
+        from model.options_scan import bs_greeks
+
+        if not args:
+            return "usage: add ce|pe <strike> <expiry#|date> [lots] [@premium]"
+        strike = float(args[0])
+        expiry = self._resolve_expiry(args[1]) if len(args) > 1 else (
+            self.state.chain.expiries[0] if self.state.chain
+            and self.state.chain.expiries else None)
+        if not expiry:
+            return (f"cannot resolve expiry {args[1]!r} — use a chain index "
+                    f"(1, 2…), an ISO date, or a month fragment")
+        lots = int(args[2]) if len(args) > 2 and args[2].isdigit() else 1
+        premium = next((float(a[1:]) for a in args if a.startswith("@")), None)
+
+        leg = self._lookup_leg(expiry, strike, opt_type)
+        if premium is None:
+            premium = leg.ltp if leg else None
+        if not premium:
+            return f"no LTP found for {strike:g} {opt_type.upper()} {expiry} — pass @premium"
+
+        spot = (self.state.chain.underlying_value if self.state.chain else None) \
+            or (self.state.history.quote.price if self.state.history else None)
+        dte = max((datetime.strptime(expiry, "%Y-%m-%d")
+                   - datetime.now()).days, 0.25)
+        greeks = bs_greeks(spot or strike, strike, dte,
+                           ((leg.iv if leg else None) or 14.0) / 100.0,
+                           is_call=(opt_type == "ce"))
+        lot_size = SETTINGS.lot_size
+        trade = j.open_trade(
+            instrument=SETTINGS.option_symbol,
+            direction="long",
+            entry_price=premium,
+            quantity=lots * lot_size,
+            stop_loss=round(premium * (1 - SETTINGS.default_stop_pct / 100), 2),
+            target=round(premium * (1 + SETTINGS.default_stop_pct / 200), 2),
+            strategy="option_buy",
+            entry_reason=f"manual option entry ({lots} lot{'s' if lots != 1 else ''})",
+            states=self._current_states(),
+            option_type=opt_type,
+            strike=strike,
+            expiry=expiry,
+            lots=lots,
+            lot_size=lot_size,
+            delta_entry=greeks["delta"],
+        )
+        return (f"opened #{trade.id} {trade.contract_name} @ ₹{premium:,.2f} "
+                f"(Δ {greeks['delta']:+.2f}, {lots}L = ₹{premium * lots * lot_size:,.0f})")
+
+    def _default_exit_price(self, j, trade_id: int) -> float | None:
+        """Exit at the contract's current LTP when available."""
+        t = j.get(trade_id)
+        if t and t.option_type and t.strike is not None:
+            leg = self._lookup_leg(t.expiry, t.strike, t.option_type.lower())
+            if leg and leg.ltp:
+                return float(leg.ltp)
+        return self.state.history.quote.price if self.state.history else None
+
     def _run_journal_command(self, raw: str) -> str | None:
         j = shared_journal()
         parts = shlex.split(raw)
@@ -268,7 +352,10 @@ class NiftyTerminal(App):
         try:
             match cmd:
                 case "add" | "take":
-                    direction = args[0]
+                    kind = args[0].lower()
+                    if kind in ("ce", "pe"):
+                        return self._open_option_trade(j, kind, args[1:])
+                    direction = kind
                     qty = float(args[1]) if len(args) > 1 else 75.0
                     strategy = args[2] if len(args) > 2 else DEFAULT_STRATEGY.name
                     price = self.state.history.quote.price
@@ -287,7 +374,8 @@ class NiftyTerminal(App):
                     return f"opened #{trade.id} {trade.direction.upper()} @{price:,.2f}"
                 case "close":
                     trade_id = int(args[0])
-                    price = float(args[1]) if len(args) > 1 else self.state.history.quote.price
+                    price = float(args[1]) if len(args) > 1 \
+                        else self._default_exit_price(j, trade_id)
                     closed = j.close_trade(trade_id, price,
                                            exit_reason="manual close")
                     return (f"closed #{trade_id} P&L {closed.pnl:+,.2f}"

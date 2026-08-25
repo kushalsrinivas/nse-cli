@@ -242,8 +242,9 @@ def options_table(chain: OptionChain, expiry: str) -> Panel:
 def trades_table(trades: list[Trade], title: str) -> Panel:
     table = Table(box=box.SIMPLE, expand=True, header_style="bold cyan")
     for name, kw in (("ID", {}), ("Time", {"style": "grey50"}),
-                     ("Dir", {"justify": "center"}), ("Entry", {"justify": "right"}),
-                     ("Exit", {"justify": "right"}), ("Qty", {"justify": "right"}),
+                     ("Contract", {}), ("Dir", {"justify": "center"}),
+                     ("Entry", {"justify": "right"}),
+                     ("Exit", {"justify": "right"}), ("Lots", {"justify": "right"}),
                      ("P&L", {"justify": "right"}), ("P&L %", {"justify": "right"}),
                      ("Strategy", {}), ("Status", {"justify": "center"}),
                      ("Reason/Notes", {})):
@@ -252,15 +253,20 @@ def trades_table(trades: list[Trade], title: str) -> Panel:
     for t in trades:
         pnl_col = "bright_green" if (t.pnl or 0) >= 0 else "bright_red"
         dir_mark = "L" if t.direction == "long" else "S"
+        contract = Text(t.contract_name)
+        if t.option_type:
+            contract.stylize("bold magenta" if t.option_type == "CE" else "bold red")
+        lots = f"{t.lots:g}L" if t.lots else f"{t.quantity:g}"
         reason = t.exit_reason if t.status == "closed" and t.exit_reason else (
             t.entry_reason or t.notes or "")[:40]
         table.add_row(
             str(t.id),
             t.timestamp[:16].replace("T", " "),
+            contract,
             Text(dir_mark, style="green" if dir_mark == "L" else "red"),
             f"{t.entry_price:,.2f}",
             f"{t.exit_price:,.2f}" if t.exit_price else "—",
-            f"{t.quantity:g}",
+            lots,
             Text(_signed(t.pnl), style=pnl_col) if t.pnl is not None else "—",
             f"{t.pnl_pct:+.2f}%" if t.pnl_pct is not None else "—",
             t.strategy,
@@ -271,8 +277,9 @@ def trades_table(trades: list[Trade], title: str) -> Panel:
 
 
 JOURNAL_HELP = (
+    "[bold]add[/bold] ce|pe <strike> <expiry#|date> [lots] [@premium] · "
     "[bold]add[/bold] long|short [qty] [strategy] · "
-    "[bold]close[/bold] id [price] · [bold]note[/bold] id text · "
+    "[bold]close[/bold] id [exit_premium] · [bold]note[/bold] id text · "
     "[bold]del[/bold] id · [bold]filter[/bold] open|closed|all · "
     "[bold]search[/bold] text · [bold]show[/bold] id"
 )

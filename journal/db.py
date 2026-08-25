@@ -36,11 +36,27 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl_pct REAL,
     duration_minutes REAL,
     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'closed')),
-    notes TEXT DEFAULT ''
+    notes TEXT DEFAULT '',
+    option_type TEXT DEFAULT '',
+    strike REAL,
+    expiry TEXT DEFAULT '',
+    lots INTEGER,
+    lot_size INTEGER,
+    delta_entry REAL
 );
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
 """
+
+# Columns added after v1 — applied to existing databases via ALTER TABLE.
+_MIGRATIONS = (
+    ("option_type", "TEXT DEFAULT ''"),
+    ("strike", "REAL"),
+    ("expiry", "TEXT DEFAULT ''"),
+    ("lots", "INTEGER"),
+    ("lot_size", "INTEGER"),
+    ("delta_entry", "REAL"),
+)
 
 
 @dataclass
@@ -51,7 +67,7 @@ class Trade:
     direction: str                  # 'long' | 'short'
     entry_price: float
     exit_price: float | None = None
-    quantity: float = 1.0
+    quantity: float = 1.0           # total units (options: lots × lot_size)
     stop_loss: float | None = None
     target: float | None = None
     strategy: str = "manual"
@@ -66,6 +82,19 @@ class Trade:
     duration_minutes: float | None = None
     status: str = "open"
     notes: str = ""
+    # Options-specific (empty/None for plain index trades)
+    option_type: str = ""           # 'CE' | 'PE'
+    strike: float | None = None
+    expiry: str = ""                # ISO date
+    lots: int | None = None
+    lot_size: int | None = None
+    delta_entry: float | None = None
+
+    @property
+    def contract_name(self) -> str:
+        if not self.option_type:
+            return self.instrument
+        return f"{self.instrument} {self.strike:g} {self.option_type} {self.expiry}"
 
     @staticmethod
     def compute_pnl(trade: "Trade") -> tuple[float, float] | None:
@@ -85,6 +114,15 @@ class Journal:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add post-v1 columns to databases created before options support."""
+        existing = {r["name"] for r in self.conn.execute("PRAGMA table_info(trades)")}
+        for col, decl in _MIGRATIONS:
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {decl}")
+        self.conn.commit()
 
     # -- helpers -------------------------------------------------------------
 
@@ -165,7 +203,11 @@ class Journal:
                    quantity: float = 1.0, stop_loss: float | None = None,
                    target: float | None = None, strategy: str = "manual",
                    entry_reason: str = "", states: dict[str, str] | None = None,
-                   timestamp: datetime | None = None) -> Trade:
+                   timestamp: datetime | None = None,
+                   option_type: str = "", strike: float | None = None,
+                   expiry: str = "", lots: int | None = None,
+                   lot_size: int | None = None,
+                   delta_entry: float | None = None) -> Trade:
         states = states or {}
         return self.add(Trade(
             id=None,
@@ -182,6 +224,12 @@ class Journal:
             ema_state=states.get("ema", ""),
             sma_state=states.get("sma", ""),
             volume_state=states.get("volume", ""),
+            option_type=option_type.upper(),
+            strike=strike,
+            expiry=expiry,
+            lots=lots,
+            lot_size=lot_size,
+            delta_entry=delta_entry,
         ))
 
     def close_trade(self, trade_id: int, exit_price: float,
