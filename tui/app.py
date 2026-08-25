@@ -56,8 +56,9 @@ class NiftyTerminal(App):
         Binding("4", "tab('signals')", "Signals", show=False),
         Binding("5", "tab('journal')", "Journal", show=False),
         Binding("6", "tab('performance')", "Performance", show=False),
-        Binding("r", "refresh_data", "Refresh"),
+        Binding("r", "force_refresh", "Refresh"),
         Binding("e", "next_expiry", "Expiry"),
+        Binding("c", "copy_context", "Copy"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -90,15 +91,20 @@ class NiftyTerminal(App):
 
     # -- data loading (background worker) --------------------------------------
 
+    def action_force_refresh(self) -> None:
+        """'r' — bypass all caches and pull fresh data."""
+        self._refresh_worker(True)
+
     @work(exclusive=True, thread=True)
-    def action_refresh_data(self) -> None:
+    def action_refresh_data(self, force: bool = False) -> None:
         try:
-            history = nifty.fetch_history()
+            history = nifty.fetch_history(use_cache=not force)
             ind = ta.compute(history.candles)
             states = snapshot(ind)
             events = scan_events(ind)
             try:
-                chain = opts.fetch_chain(expiry=self.state.expiry)
+                chain = opts.fetch_chain(expiry=self.state.expiry,
+                                         use_cache=not force)
                 self.state.expiry = chain.expiries[0] if not self.state.expiry else self.state.expiry
             except Exception as exc:
                 chain = None
@@ -110,8 +116,15 @@ class NiftyTerminal(App):
                 self.state.events = events
                 self.state.chain = chain
             self.call_from_thread(self._render_all)
+            if force:
+                self.call_from_thread(
+                    lambda: self.notify("refreshed from source", timeout=3))
         except Exception as exc:
             self.call_from_thread(self._show_error, str(exc))
+
+    def _refresh_worker(self, force: bool) -> None:
+        # Re-enter through the worker so the UI never blocks on I/O.
+        self.action_refresh_data(force)
 
     # -- rendering ---------------------------------------------------------------
 
@@ -233,6 +246,37 @@ class NiftyTerminal(App):
         self.state.expiry = chain.expiries[(idx + 1) % len(chain.expiries)]
         self._render_options()
 
+    def action_copy_context(self) -> None:
+        """'c' — copy the useful text for the active tab to the system
+        clipboard."""
+        tab = self.query_one(TabbedContent).active
+        text = ""
+        if tab == "journal":
+            trades = shared_journal().list(limit=1)
+            if trades:
+                t = trades[0]
+                parts = [t.contract_name]
+                if t.option_type:
+                    parts.append(f"expiry {t.expiry}")
+                    parts.append(f"{t.lots}L @ ₹{t.entry_price:,.2f}")
+                    if t.delta_entry is not None:
+                        parts.append(f"Δ {t.delta_entry:+.2f}")
+                else:
+                    parts.append(f"{t.direction} @ {t.entry_price:,.2f}")
+                parts.append(t.status)
+                text = " | ".join(parts)
+        elif not text:
+            hist = self.state.history
+            if hist:
+                q = hist.quote
+                text = (f"NIFTY {q.price:,.2f} {q.change:+.2f} "
+                        f"({q.change_pct:+.2f}%)")
+        if not text:
+            self.notify("nothing to copy", severity="warning", timeout=3)
+            return
+        self.copy_to_clipboard(text)
+        self.notify(f"copied → {text}", timeout=4)
+
     # -- journal input handling -----------------------------------------------
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -244,6 +288,11 @@ class NiftyTerminal(App):
             return
         feedback = self._run_journal_command(raw)
         if feedback:
+            try:
+                self.copy_to_clipboard(feedback)
+                feedback += "   [copied to clipboard]"
+            except Exception:
+                pass
             self.notify(feedback, severity="information", timeout=6)
         self._render_journal()
         self._render_performance()
