@@ -277,10 +277,15 @@ class NiftyTerminal(App):
         matches = [e for e in chain.expiries if token.lower() in e.lower()]
         return matches[0] if len(matches) == 1 else None
 
-    def _lookup_leg(self, expiry: str, strike: float, opt_type: str):
-        if not self.state.chain:
+    def _fresh_leg(self, expiry: str, strike: float, opt_type: str):
+        """Live leg lookup — bypasses the cache so trade prices are never
+        stale."""
+        from data import options as opts
+        try:
+            chain = opts.fetch_chain(expiry=expiry, use_cache=False)
+        except Exception:
             return None
-        for row in self.state.chain.for_expiry(expiry):
+        for row in chain.for_expiry(expiry):
             if abs(row.strike - strike) < 0.51:
                 return row.call if opt_type == "ce" else row.put
         return None
@@ -301,7 +306,7 @@ class NiftyTerminal(App):
         lots = int(args[2]) if len(args) > 2 and args[2].isdigit() else 1
         premium = next((float(a[1:]) for a in args if a.startswith("@")), None)
 
-        leg = self._lookup_leg(expiry, strike, opt_type)
+        leg = self._fresh_leg(expiry, strike, opt_type)
         if premium is None:
             premium = leg.ltp if leg else None
         if not premium:
@@ -332,14 +337,18 @@ class NiftyTerminal(App):
             lot_size=lot_size,
             delta_entry=greeks["delta"],
         )
+        warn = ""
+        if datetime.now().strftime("%Y-%m-%d") == expiry:
+            warn = "  ⚠ EXPIRY DAY"
         return (f"opened #{trade.id} {trade.contract_name} @ ₹{premium:,.2f} "
-                f"(Δ {greeks['delta']:+.2f}, {lots}L = ₹{premium * lots * lot_size:,.0f})")
+                f"(Δ {greeks['delta']:+.2f}, {lots}L = ₹{premium * lots * lot_size:,.0f})"
+                f"{warn}")
 
     def _default_exit_price(self, j, trade_id: int) -> float | None:
         """Exit at the contract's current LTP when available."""
         t = j.get(trade_id)
         if t and t.option_type and t.strike is not None:
-            leg = self._lookup_leg(t.expiry, t.strike, t.option_type.lower())
+            leg = self._fresh_leg(t.expiry, t.strike, t.option_type.lower())
             if leg and leg.ltp:
                 return float(leg.ltp)
         return self.state.history.quote.price if self.state.history else None
