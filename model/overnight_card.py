@@ -1,22 +1,20 @@
-"""Nightly overnight-setup decision.
+"""Nightly overnight-setup decision engine.
 
-Runs the full model on today's close, matches tonight's conditions against
-the historical overnight research (model/overnight.py), and emits a
-GO / NO-GO card with contract + sizing.
+Runs the technical model on today's close, extracts the empirical distribution
+of overnight gaps for the matched setup cohort, evaluates candidate option
+structures (ITM single-leg, ATM single-leg control, and Debit Spreads) through
+the 2nd-order Greek EV engine, and emits a rigorous GO / NO-GO decision.
 
-GO requires ALL of:
-    1. composite score >= 65 and a non-neutral direction
-    2. the matched historical bucket shows a real edge:
-       n >= min_bucket_n AND avg gap clears theta breakeven AND win rate > 50%
-    3. risk layer approves the size
-
-Most nights should be NO-GO — that's the discipline working.
+Hard Gates:
+    1. Thin volume (rel volume < 0.8x) -> Hard Block
+    2. Expiry / calendar risk -> Hard Block
+    3. Option liquidity / bad spreads -> Hard Block
+    4. Net Expected Value <= 0 -> Hard Block (decay & friction overwhelm edge)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-
 import numpy as np
 
 from analysis.signals import Direction
@@ -24,7 +22,13 @@ from config import SETTINGS
 from data.options import OptionChain
 from model.composite import CompositeResult, MIN_TRADEABLE_CONFIDENCE
 from model.indicators import IndicatorAssessment
-from model.options_scan import OptionCandidate, scan_candidates
+from model.magnitude import DistributionalMove, compute_distribution
+from model.options_ev import (
+    StrategyCandidate,
+    StrategyEV,
+    generate_strategy_candidates,
+    rank_and_select_best_strategy,
+)
 from model.regime import RegimeProfile
 from model.risk import RiskManager, SizingResult
 from model.weights import WeightSet
@@ -57,12 +61,17 @@ class OvernightSetup:
     hist_avg_gap_pct: float = 0.0
     hist_p10_gap: float = 0.0
     hist_p90_gap: float = 0.0
+    distribution: DistributionalMove | None = None
     outlook: dict = field(default_factory=dict)
-    candidates: list[OptionCandidate] = field(default_factory=list)
-    chosen: OptionCandidate | None = None
+    strategy_evaluations: list[StrategyEV] = field(default_factory=list)
+    chosen_strategy: StrategyEV | None = None
     sizing: SizingResult | None = None
     go: bool = False
     reasons: list[str] = field(default_factory=list)
+
+    # Legacy compatibility fields
+    chosen: object = None
+    candidates: list[object] = field(default_factory=list)
 
     @property
     def verdict(self) -> str:
@@ -115,17 +124,19 @@ def build_overnight_setup(candles, chain: OptionChain | None,
                           signals=None, journal=None,
                           settings=SETTINGS,
                           events: list[str] | None = None) -> OvernightSetup:
-    """events: known scheduled risks for tonight (e.g. 'US-Iran sanctions
-    announcement'). Each one is a hard NO-GO unless the caller strips them —
-    event nights have un-modelable gap distributions."""
-    from analysis.indicators import compute as compute_indicators
+    """Evaluate tonight's setup through the distributional EV engine."""
     from analysis.signals import Direction as Dir
     from model.backtest import _base_frame
-    from model.indicators import assess_all
     from model.journal import SetupJournal, SetupRecord, now_iso
-    from model.overnight import collect_overnight_signals, premium_outlook
+    from model.overnight import (
+        _expiry_weekday,
+        apply_discipline,
+        classify_next_expiry,
+        collect_overnight_signals,
+        estimate_expected_iv_change,
+        premium_outlook,
+    )
     from model.pipeline import evaluate as run_pipeline
-    from model.regime import detect_regime
 
     frame = _base_frame(candles)
     row = frame.iloc[-1]
@@ -160,8 +171,7 @@ def build_overnight_setup(candles, chain: OptionChain | None,
         close_pos=round(close_pos, 3),
     )
 
-    # --- Historical bucket match -------------------------------------------
-    from model.overnight import apply_discipline, collect_overnight_signals
+    # --- Historical bucket match & Distributional extraction ---------------
     if signals is None:
         signals = collect_overnight_signals(candles, settings)
     signals = apply_discipline(signals)
@@ -171,80 +181,114 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     setup.hist_n = len(subset)
     if subset:
         gaps = np.array([s.gap_pct for s in subset])
-        setup.hist_win_rate_open = round(float((gaps > 0).mean()), 3)
-        setup.hist_avg_gap_pct = round(float(gaps.mean()), 4)
-        setup.hist_p10_gap = round(float(np.percentile(gaps, 10)), 3)
-        setup.hist_p90_gap = round(float(np.percentile(gaps, 90)), 3)
+        dist = compute_distribution(gaps)
+        setup.distribution = dist
+        setup.hist_win_rate_open = dist.p_positive
+        setup.hist_avg_gap_pct = dist.mean_pct
+        setup.hist_p10_gap = dist.p10_pct
+        setup.hist_p90_gap = dist.p90_pct
         atm_iv = _chain_atm_iv(chain, setup.spot)
         dte = _nearest_dte(chain)
         setup.outlook = premium_outlook(gaps, setup.spot, atm_iv, dte, settings)
 
-    # --- GO / NO-GO gates ----------------------------------------------------
+    # --- HARD GATES --------------------------------------------------------
     reasons = []
-    if base.composite.score < MIN_TRADEABLE_CONFIDENCE:
-        reasons.append(f"composite {base.composite.score:.0f} below "
-                       f"{MIN_TRADEABLE_CONFIDENCE:.0f}")
-    elif base.composite.direction is Dir.NEUTRAL:
-        reasons.append("no directional edge")
 
-    # Calendar discipline: tonight's entry must clear weekends + expiry.
+    # Hard Gate 1: Thin volume is non-negotiable
+    if conds.thin_volume:
+        reasons.append(f"thin volume (rel volume {rel_vol:.2f}x < 0.8x) -> no trade edge")
+
+    # Hard Gate 2: Directional score threshold
+    if base.composite.score < MIN_TRADEABLE_CONFIDENCE:
+        reasons.append(f"composite confidence {base.composite.score:.0f} below {MIN_TRADEABLE_CONFIDENCE:.0f}")
+    elif base.composite.direction is Dir.NEUTRAL:
+        reasons.append("no directional edge (neutral setup)")
+
+    # Hard Gate 3: Calendar & Expiry discipline
     entry_ts = frame.index[-1]
-    from model.overnight import _expiry_weekday, classify_next_expiry
     if entry_ts.weekday() == 4:
-        reasons.append("Friday entry holds over the weekend — blocked")
+        reasons.append("Friday entry holds over weekend -> excessive theta decay")
     if (entry_ts.weekday() + 1) % 5 == _expiry_weekday(entry_ts):
         kind = classify_next_expiry(entry_ts)
-        stakes = ("max open interest + max gamma overnight"
-                  if kind == "monthly" else "elevated gamma overnight")
-        reasons.append(f"next session is {kind} expiry ({stakes}), blocked")
+        stakes = "max open interest + max gamma" if kind == "monthly" else "elevated gamma overnight"
+        reasons.append(f"next session is {kind} expiry ({stakes}) -> blocked")
     if entry_ts.weekday() == _expiry_weekday(entry_ts):
-        reasons.append("expiry day — no new entries")
+        reasons.append("expiry day -> no new entries")
 
-    # Scheduled event risk: un-modelable gap distributions → hard block.
+    # Hard Gate 4: Scheduled event risks
     for ev in (events or []):
         reasons.append(f"scheduled event risk: {ev}")
 
+    # Hard Gate 5: Sample sufficiency
     if setup.hist_n < settings.min_bucket_n:
-        reasons.append(f"matched bucket too thin (n={setup.hist_n} < "
-                       f"{settings.min_bucket_n})")
-    else:
-        be = setup.outlook.get("breakeven_gap_pct", 99.0)
-        if setup.hist_avg_gap_pct <= be:
-            reasons.append(f"avg gap {setup.hist_avg_gap_pct:+.3f}% fails theta "
-                           f"breakeven {be:+.3f}%")
-        if setup.hist_win_rate_open <= 0.5:
-            reasons.append(f"open win rate {setup.hist_win_rate_open * 100:.0f}% ≤ 50%")
+        reasons.append(f"matched cohort too thin (n={setup.hist_n} < {settings.min_bucket_n})")
 
-    # --- Contract + sizing (only pursued when otherwise GO) ------------------
-    if not reasons:
-        if chain is None:
-            reasons.append("option chain unavailable")
+    # --- OPTIONS CANDIDATE GENERATION & EV ENGINE --------------------------
+    if chain is None or not chain.rows:
+        reasons.append("option chain unavailable")
+    elif setup.distribution and base.composite.direction in (Dir.BULLISH, Dir.BEARISH):
+        cands = generate_strategy_candidates(
+            chain=chain,
+            spot=setup.spot,
+            direction=base.composite.direction,
+            lot_size=settings.lot_size,
+        )
+        if not cands:
+            reasons.append("no liquid candidate contracts found (ITM/ATM/Spread)")
         else:
-            setup.candidates = scan_candidates(chain, base.composite.direction)
-            setup.chosen = setup.candidates[0] if setup.candidates else None
-            if setup.chosen:
-                result = RiskManager(settings=settings).size(
-                    premium=setup.chosen.premium,
-                    stop_price=setup.chosen.stop_price,
-                    target_price=setup.chosen.target_price,
-                    tier_risk_pct=base.composite.risk_multiplier,
-                    dte=max(setup.chosen.dte, 1),
-                    direction_key=base.composite.direction.value,
-                )
-                setup.sizing = result
-                if not result.allowed:
-                    reasons.append(result.blocked_reason or "risk limits")
+            exp_iv_chg = estimate_expected_iv_change(
+                weekday=entry_ts.weekday(),
+                dte=cands[0].dte,
+                regime=setup.regime.regime.value,
+            )
+            best_ev, all_evs = rank_and_select_best_strategy(
+                candidates=cands,
+                spot=setup.spot,
+                dist=setup.distribution,
+                expected_delta_iv=exp_iv_chg,
+                holding_days=1.0,
+                lot_size=settings.lot_size,
+            )
+            setup.strategy_evaluations = all_evs
+            setup.chosen_strategy = best_ev
+
+            # Hard Gate 6: Contract Liquidity & Positive Net EV
+            if best_ev is None:
+                reasons.append("unable to evaluate strategy candidates")
             else:
-                reasons.append("no liquid candidate contract")
+                if not best_ev.is_tradeable:
+                    reasons.extend(list(best_ev.rejection_reasons))
+                if best_ev.net_ev_per_lot <= 0:
+                    reasons.append(
+                        f"best strategy ({best_ev.candidate.name}) Net EV is negative "
+                        f"(₹{best_ev.net_ev_per_lot:+,.0f}/lot, {best_ev.net_ev_pct:+.1f}%)"
+                    )
+
+                # Sizing calculation if tradeable
+                if best_ev.is_tradeable and best_ev.net_ev_per_lot > 0:
+                    prem = best_ev.candidate.net_premium
+                    stop_p = round(prem * (1 - settings.default_stop_pct / 100), 2)
+                    target_p = round(prem * (1 + settings.default_stop_pct * settings.target_multiplier / 100), 2)
+                    result = RiskManager(settings=settings).size(
+                        premium=prem,
+                        stop_price=stop_p,
+                        target_price=target_p,
+                        tier_risk_pct=base.composite.risk_multiplier,
+                        dte=max(best_ev.candidate.dte, 1),
+                        direction_key=base.composite.direction.value,
+                    )
+                    setup.sizing = result
+                    if not result.allowed:
+                        reasons.append(result.blocked_reason or "risk manager ceiling")
 
     setup.reasons = reasons
-    setup.go = not reasons
+    setup.go = (len(reasons) == 0)
     _record(setup, journal, events=events)
     return setup
 
 
 # ---------------------------------------------------------------------------
-# helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _chain_atm_iv(chain: OptionChain | None, spot: float) -> float:
@@ -261,9 +305,8 @@ def _nearest_dte(chain: OptionChain | None) -> int:
         return 7
     expiries = sorted({r.call.expiry for r in chain.rows})
     try:
-        return max((datetime.strptime(expiries[0], "%Y-%m-%d")
-                    - datetime.now()).days, 1)
-    except ValueError:
+        return max((datetime.strptime(expiries[0], "%Y-%m-%d") - datetime.now()).days, 1)
+    except Exception:
         return 7
 
 
@@ -271,35 +314,36 @@ def _record(setup: OvernightSetup, journal, events=None) -> None:
     try:
         j = journal or SetupJournal()
         ev_txt = f" events={';'.join(events)}" if events else ""
+        ch = setup.chosen_strategy.candidate if setup.chosen_strategy else None
         j.record(SetupRecord(
             created_at=now_iso(),
             nifty_price=round(setup.spot, 2),
-            contract=setup.chosen.symbol if setup.chosen else "",
-            expiry=setup.chosen.leg.expiry if setup.chosen else "",
+            contract=ch.symbol if ch else "",
+            expiry=ch.expiry if ch else "",
             direction=setup.composite.direction.value,
             composite_score=setup.composite.score,
             classification=f"OVERNIGHT {setup.verdict}",
-            win_probability=setup.outlook.get("prem_win_prob"),
+            win_probability=setup.chosen_strategy.win_probability if setup.chosen_strategy else None,
             grade=_grade(setup),
             regime=setup.regime.regime.value,
-            entry=setup.chosen.premium if setup.chosen else None,
-            stop=setup.chosen.stop_price if setup.chosen else None,
-            target=setup.chosen.target_price if setup.chosen else None,
+            entry=ch.net_premium if ch else None,
+            stop=None,
+            target=None,
             contracts=setup.sizing.contracts if setup.sizing else None,
             max_risk=setup.sizing.max_risk_rupees if setup.sizing else None,
             indicator_scores={a.name: a.confidence for a in setup.assessments},
             group_weights=dict(setup.weights.weights),
             blocked_reason="" if setup.go else "; ".join(setup.reasons),
             notes=(f"bucket='{setup.matched_bucket}' n={setup.hist_n} "
-                   f"win={setup.hist_win_rate_open * 100:.0f}% "
-                   f"gap={setup.hist_avg_gap_pct:+.3f}%" + ev_txt),
+                   f"ev_lot=₹{setup.chosen_strategy.net_ev_per_lot:+,.0f}" if setup.chosen_strategy else "" + ev_txt),
         ))
     except Exception:
         pass
 
 
 def _grade(setup: OvernightSetup) -> str:
-    if not setup.go:
+    if not setup.go or not setup.chosen_strategy:
         return "F"
-    wr = setup.hist_win_rate_open
-    return "A" if wr >= 0.60 else "B" if wr >= 0.55 else "C"
+    wr = setup.chosen_strategy.win_probability
+    ev_pct = setup.chosen_strategy.net_ev_pct
+    return "A+" if (wr >= 0.60 and ev_pct >= 5.0) else "A" if wr >= 0.55 else "B"

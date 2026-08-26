@@ -1,26 +1,13 @@
 """Overnight option-buying strategy.
 
-Your play: buy a CE/PE near today's close, expecting tomorrow's open to
-gap/continue in your favor. This module answers the only question that
-matters for it, empirically:
+Your play: buy a CE/PE or debit spread near today's close, expecting tomorrow's
+open to gap/continue in your favor. This module answers the core question:
 
     "After days that looked like TODAY, what did NIFTY do by the next open?"
 
 It replays history day by day with the same composite model used live,
 records every qualifying signal's next-open / next-close outcome, and
-buckets results by the conditions that could plausibly drive an
-overnight edge:
-
-  * close location inside the day's range (strong close = fuel for gaps)
-  * alignment with the EMA-50 trend (with-trend vs counter-trend)
-  * relative volume (participation behind the move)
-  * regime (trending vs sideways vs high vol)
-  * score band (65-74 vs 75+)
-
-The overnight cost side is explicit: an option held overnight pays one
-session of theta plus spread. The setup card converts the historical gap
-distribution into an estimated premium return via delta/theta so "the
-index gaps my way" is never confused with "my option makes money".
+models the full probability distribution of overnight gaps.
 """
 
 from __future__ import annotations
@@ -36,6 +23,7 @@ from config import SETTINGS
 from model.backtest import _base_frame
 from model.composite import MIN_TRADEABLE_CONFIDENCE, compute_composite
 from model.indicators import assess_all
+from model.magnitude import DistributionalMove, compute_distribution
 from model.regime import detect_regime
 from model.weights import compute_effective_weights, load_learned_weights
 
@@ -51,8 +39,10 @@ class OvernightSignal:
     next_close: float           # alternative exit (day T+1 close)
     next_low: float
     next_high: float
-    gap_pct: float              # (next_open - entry) / entry * 100, signed long-basis
-    close_move_pct: float       # same through T+1 close
+    gap_pct: float              # signed in trade direction (+ is win, - is loss)
+    raw_gap_pct: float          # actual NIFTY gap %: (next_open - entry) / entry * 100
+    close_move_pct: float       # same through T+1 close (signed in trade direction)
+    raw_close_move_pct: float   # actual NIFTY move through T+1 close
     close_pos: float            # where T closed within its own range (0-1)
     rel_volume: float
     with_trend: bool
@@ -119,6 +109,8 @@ def collect_overnight_signals(candles, settings=SETTINGS,
         rng = float(row["high"]) - float(row["low"])
         e9, e50 = float(row["ema9"]), float(row["ema50"])
         sign = 1 if comp.direction is Direction.BULLISH else -1
+        raw_g = (op - entry) / entry * 100
+        raw_c = (float(nxt["close"]) - entry) / entry * 100
         signals.append(OvernightSignal(
             timestamp=frame.index[i],
             direction=comp.direction,
@@ -129,8 +121,10 @@ def collect_overnight_signals(candles, settings=SETTINGS,
             next_close=float(nxt["close"]),
             next_low=float(nxt["low"]),
             next_high=float(nxt["high"]),
-            gap_pct=sign * (op - entry) / entry * 100,
-            close_move_pct=sign * (float(nxt["close"]) - entry) / entry * 100,
+            gap_pct=sign * raw_g,
+            raw_gap_pct=raw_g,
+            close_move_pct=sign * raw_c,
+            raw_close_move_pct=raw_c,
             close_pos=(float(row["close"]) - float(row["low"])) / rng if rng > 0 else 0.5,
             rel_volume=float(row.get("rel_volume", np.nan)),
             with_trend=(e9 > e50) == (sign > 0),
@@ -143,8 +137,6 @@ def collect_overnight_signals(candles, settings=SETTINGS,
 # Discipline filters
 # ---------------------------------------------------------------------------
 
-# NIFTY weekly expiry weekday by era: Thursday until NSE moved index
-# derivatives to Tuesday effective Sep 2025. (weekday(): Mon=0)
 _EXPIRY_ERAS = ((pd.Timestamp("2025-09-01"), 1), (pd.Timestamp("1970-01-01"), 3))
 
 
@@ -156,8 +148,7 @@ def _expiry_weekday(ts) -> int:
 
 
 def _is_last_expiry_of_month(ts) -> bool:
-    """Heuristic: an expiry weekday in the final 7 days of the month is the
-    monthly contract; earlier ones are weeklies."""
+    """Heuristic: an expiry weekday in the final 7 days of the month is monthly."""
     nxt = ts + pd.Timedelta(days=7)
     return nxt.month != ts.month
 
@@ -165,7 +156,6 @@ def _is_last_expiry_of_month(ts) -> bool:
 def classify_next_expiry(next_ts) -> str:
     """'monthly' | 'weekly' — for labelling the gamma risk of tonight's hold."""
     wd = _expiry_weekday(next_ts)
-    # Walk forward to that weekday
     delta = (wd - next_ts.weekday()) % 5 or 5
     exp_ts = next_ts + pd.Timedelta(days=delta)
     return "monthly" if _is_last_expiry_of_month(exp_ts) else "weekly"
@@ -175,14 +165,7 @@ def apply_discipline(signals: list[OvernightSignal], *,
                      skip_weekends: bool = True,
                      skip_hold_into_expiry: bool = True,
                      skip_entry_on_expiry: bool = True) -> list[OvernightSignal]:
-    """Trading-discipline filter.
-
-    - skip_weekends: no entries whose exit lands after a weekend/holiday
-      (calendar gap > 1 day) — extra decay days with no edge.
-    - skip_hold_into_expiry: never buy at close when the NEXT session is a
-      weekly expiry — that overnight is max gamma/theta.
-    - skip_entry_on_expiry: don't initiate on expiry day itself.
-    """
+    """Trading-discipline filter."""
     out = []
     for s in signals:
         if skip_weekends and s.calendar_gap_days > 1:
@@ -197,7 +180,29 @@ def apply_discipline(signals: list[OvernightSignal], *,
 
 
 # ---------------------------------------------------------------------------
-# Condition buckets
+# Empirical IV change estimator
+# ---------------------------------------------------------------------------
+
+def estimate_expected_iv_change(weekday: int, dte: int, regime: str = "sideways") -> float:
+    """Estimated overnight change in ATM IV (in percentage points, e.g. -0.4%).
+
+    Historical characteristics:
+    - Friday to Monday hold: IV typically crushes by -0.6% to -1.2% due to weekend decay.
+    - Expiry-adjacent days (DTE <= 1): High gamma can cause IV spikes or heavy morning crush.
+    - High volatility regimes: IV tends to expand or stay sticky (+0.2% to +0.5%).
+    - Normal weekday (Mon-Wed): mild morning crush ~ -0.2% to -0.4%.
+    """
+    if weekday == 4:  # Friday entry
+        return -0.8
+    if "high_vol" in regime:
+        return 0.3
+    if dte <= 1:
+        return -0.5
+    return -0.25
+
+
+# ---------------------------------------------------------------------------
+# Condition buckets & Distribution Extraction
 # ---------------------------------------------------------------------------
 
 _FILTERS: tuple[tuple[str, object], ...] = (
@@ -216,6 +221,15 @@ _FILTERS: tuple[tuple[str, object], ...] = (
 )
 
 
+def get_distribution_for_signals(
+    signals: list[OvernightSignal],
+    target_direction: Direction = Direction.BULLISH,
+) -> DistributionalMove:
+    """Extract raw market move distribution and directional alignment for cohort."""
+    raw_gaps = [s.raw_gap_pct for s in signals]
+    return compute_distribution(raw_gaps, target_direction=target_direction)
+
+
 def bucket_stats(signals: list[OvernightSignal]) -> list[BucketStats]:
     out = []
     for name, pred in _FILTERS:
@@ -225,8 +239,7 @@ def bucket_stats(signals: list[OvernightSignal]) -> list[BucketStats]:
 
 
 def combo_stats(signals: list[OvernightSignal], min_n: int = 8) -> list[BucketStats]:
-    """Intersections most likely to carry an edge: strong close + volume +
-    trend alignment."""
+    """Intersections most likely to carry an edge."""
     combos = {
         "strong close + with-trend": lambda s: (
             (s.close_pos > 0.7 if s.direction is Direction.BULLISH else s.close_pos < 0.3)
@@ -264,25 +277,18 @@ def _stats_for(name: str, subset: list[OvernightSignal]) -> BucketStats:
 
 
 # ---------------------------------------------------------------------------
-# Premium economics: index gap → option P&L
+# Legacy compatibility: basic premium outlook
 # ---------------------------------------------------------------------------
 
 def premium_outlook(gaps, spot: float, atm_iv_pct: float,
                     dte_days: int, settings=SETTINGS) -> dict:
-    """Translate a historical gap distribution into expected premium moves.
-
-    premium_pnl ≈ delta × spot_move − theta × 1 session (held one night).
-    Uses an ATM-ish delta approximation; exact numbers come from the chosen
-    contract at scan time.
-    """
-    from model.options_scan import bs_greeks
+    from model.options_ev import bs_greeks
     if len(gaps) == 0:
         return {}
     iv = max(atm_iv_pct, 1.0) / 100.0
     greeks = bs_greeks(spot, round(spot), dte_days, iv, is_call=True)
     delta = abs(greeks["delta"])
     theta = abs(greeks["theta"])
-    # Rough ATM premium estimate via 1σ to expiry.
     est_premium = spot * iv * math.sqrt(max(dte_days, 1) / 365.0) * 0.8
     if est_premium <= 0:
         return {}
