@@ -64,15 +64,15 @@ def score_bin_study(signals: list) -> None:
         if not subset:
             continue
         dist = compute_distribution([s.gap_pct for s in subset])
-        win_color = "green" if dist.p_positive >= 0.55 else "red" if dist.p_positive < 0.50 else "yellow"
+        win_color = "green" if dist.p_directional_win >= 0.55 else "red" if dist.p_directional_win < 0.50 else "yellow"
         t.add_row(
             label,
             str(dist.n_samples),
-            f"[{win_color}]{dist.p_positive * 100:.1f}%[/]",
-            f"{dist.mean_pct:+.3f}%",
-            f"{dist.median_pct:+.3f}%",
-            f"{dist.p10_pct:+.2f}%",
-            f"{dist.p90_pct:+.2f}%",
+            f"[{win_color}]{dist.p_directional_win * 100:.1f}%[/]",
+            f"{dist.directional_mean_pct:+.3f}%",
+            f"{dist.directional_median_pct:+.3f}%",
+            f"{dist.raw_p10_pct:+.2f}%",
+            f"{dist.raw_p90_pct:+.2f}%",
         )
     console.print(t)
 
@@ -215,8 +215,8 @@ def weekday_study(signals: list) -> None:
         t.add_row(
             name,
             str(len(subset)),
-            f"{dist.p_positive * 100:.1f}%",
-            f"{dist.mean_pct:+.3f}%",
+            f"{dist.p_directional_win * 100:.1f}%",
+            f"{dist.directional_mean_pct:+.3f}%",
             f"[{atm_col}]₹{atm_res['avg_lot_pnl']:+,.0f}[/]",
             f"[{itm_col}]₹{itm_res['avg_lot_pnl']:+,.0f}[/]",
         )

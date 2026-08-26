@@ -29,19 +29,20 @@ from data.cache import shared_cache
 log = logging.getLogger(__name__)
 
 MACRO_TICKERS: dict[str, str] = {
+    "indiavix": "^INDIAVIX",
+    "inda": "INDA",
     "spx": "^GSPC",
     "nasdaq": "^IXIC",
     "dow": "^DJI",
     "brent": "BZ=F",
     "wti": "CL=F",
     "usdinr": "INR=X",
-    "indiavix": "^INDIAVIX",
     "nikkei": "^N225",
     "kospi": "^KS11",
     "hangseng": "^HSI",
 }
 
-RET_FEATURES = ("spx", "nasdaq", "brent", "wti", "usdinr",
+RET_FEATURES = ("indiavix", "inda", "spx", "nasdaq", "brent", "wti", "usdinr",
                 "nikkei", "kospi", "hangseng")
 
 
@@ -131,6 +132,8 @@ class MacroSnapshot:
 
 # Display precision + unit suffix per series.
 _PRICE_FMT = {
+    "India VIX": ("{:.2f}", "pts"),
+    "GIFT Nifty (Proxy INDA)": ("${:.2f}", ""),
     "S&P 500": ("{:.2f}", "pts"), "Nasdaq": ("{:.2f}", "pts"),
     "Dow": ("{:.2f}", "pts"), "Brent": ("${:.2f}", "/bbl"),
     "WTI": ("${:.2f}", "/bbl"), "USD/INR": ("{:.2f}", "₹/$"),
@@ -146,9 +149,13 @@ def live_snapshot(period: str = "5mo") -> MacroSnapshot | None:
     except Exception as exc:
         log.warning("macro snapshot unavailable: %s", exc)
         return None
-    labels = {"spx": "S&P 500", "nasdaq": "Nasdaq", "dow": "Dow",
-              "brent": "Brent", "wti": "WTI", "usdinr": "USD/INR",
-              "nikkei": "Nikkei*", "kospi": "KOSPI*", "hangseng": "Hang Seng*"}
+    labels = {
+        "indiavix": "India VIX",
+        "inda": "GIFT Nifty (Proxy INDA)",
+        "spx": "S&P 500", "nasdaq": "Nasdaq", "dow": "Dow",
+        "brent": "Brent", "wti": "WTI", "usdinr": "USD/INR",
+        "nikkei": "Nikkei*", "kospi": "KOSPI*", "hangseng": "Hang Seng*",
+    }
     rows, notes = [], []
     for name in RET_FEATURES:
         s = macro.get(name)

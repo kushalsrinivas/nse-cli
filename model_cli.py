@@ -200,6 +200,36 @@ def cmd_overnight(args) -> int:
     return 0
 
 
+def cmd_overnight_journal(args) -> int:
+    """Overnight Trade Journal: complete audit of every GO/NO-GO run."""
+    from journal.overnight_db import shared_overnight_journal
+    from journal.overnight_perf import compute_overnight_performance
+    from tui import views
+
+    oj = shared_overnight_journal()
+
+    if args.settle:
+        rec_id = int(args.settle[0])
+        exit_p = float(args.settle[1])
+        rec = oj.settle(rec_id, exit_p, notes=args.notes)
+        if not rec:
+            console.print(f"[red]overnight record #{rec_id} not found[/]")
+            return 1
+        console.print(f"[green]settled #{rec_id} ({rec.contract_name}) @ ₹{exit_p:,.2f} → P&L: {rec.pnl_display} ({rec.outcome})[/]")
+
+    dec_filter = "GO" if args.filter == "go" else "NO-GO" if args.filter == "no-go" else "all"
+    trade_type = "actual" if args.filter == "actual" else "hypothetical" if args.filter == "hypo" else "all"
+    dir_filter = "bullish" if args.filter in ("ce", "bullish") else "bearish" if args.filter in ("pe", "bearish") else "all"
+
+    records = oj.list(decision=dec_filter, direction=dir_filter, trade_type=trade_type, search=args.search, limit=args.limit)
+    perf = compute_overnight_performance(journal=oj)
+
+    console.print(views.overnight_performance_panel(perf))
+    title = f"[bold]OVERNIGHT TRADE JOURNAL[/bold] — filter={args.filter} ({len(records)} runs)"
+    console.print(views.overnight_journal_table(records, title=title))
+    return 0
+
+
 def cmd_research(args) -> int:
     """Historical research: what follows qualifying closes?"""
     from data import nifty
@@ -262,10 +292,25 @@ def main() -> int:
     rs = sub.add_parser("research", help="historical next-open research on this strategy")
     rs.add_argument("--period", default="2y")
 
+    oj = sub.add_parser("overnight-journal", aliases=["oj"], help="audit journal of all overnight runs (GO, NO-GO, hypo)")
+    oj.add_argument("--limit", type=int, default=50)
+    oj.add_argument("--filter", default="all", help="filter: all|go|no-go|actual|hypo|ce|pe")
+    oj.add_argument("--search", default=None, help="search text")
+    oj.add_argument("--settle", nargs=2, metavar=("ID", "EXIT_PRICE"), help="settle an overnight run with open exit price")
+    oj.add_argument("--notes", default=None)
+
     args = p.parse_args()
-    return {"evaluate": cmd_evaluate, "backtest": cmd_backtest,
-            "optimize": cmd_optimize, "journal": cmd_journal,
-            "overnight": cmd_overnight, "research": cmd_research}[args.cmd](args)
+    cmd_map = {
+        "evaluate": cmd_evaluate,
+        "backtest": cmd_backtest,
+        "optimize": cmd_optimize,
+        "journal": cmd_journal,
+        "overnight": cmd_overnight,
+        "research": cmd_research,
+        "overnight-journal": cmd_overnight_journal,
+        "oj": cmd_overnight_journal,
+    }
+    return cmd_map[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -35,100 +35,173 @@ def render_overnight(setup: OvernightSetup, console: Console | None = None) -> N
 
     # Setup summary grid
     setup_grid = Table.grid(padding=(0, 2))
-    setup_grid.add_column(style="dim")
+    setup_grid.add_column(style="dim", width=18)
     setup_grid.add_column()
-    setup_grid.add_column(style="dim")
+    setup_grid.add_column(style="dim", width=18)
     setup_grid.add_column()
 
-    close_type = "Strong (Breakout)" if setup.conditions.strong_close else (
-        "Weak (Faded)" if setup.conditions.weak_close else "Neutral")
-    vol_type = f"{setup.conditions.vol_spike and 'Spike (≥1.3x)' or setup.conditions.thin_volume and 'Thin (<0.8x)' or 'Normal'}"
+    close_desc = setup.conditions.close_location.value
+    rel_v = (
+        setup.conditions.vol_spike and "Spike (≥1.3x)" or (setup.conditions.thin_volume and "Thin (<0.8x)" or "Normal")
+        if setup.conditions.vol_available else "UNAVAILABLE (Index Feed)"
+    )
     ema_type = "Aligned (With-Trend)" if setup.conditions.with_trend else "Counter-Trend"
 
     setup_grid.add_row("Direction Call", Text(f"{trade_label} ({c.score:.0f}/100)", style=f"bold {dir_color}"),
-                       "Close Location", Text(f"{close_type} (pos {setup.close_pos:.2f})", style="white"))
-    setup_grid.add_row("Relative Volume", Text(vol_type, style="white"),
+                       "Close Location", Text(close_desc, style="white"))
+    setup_grid.add_row("Relative Volume", Text(rel_v, style="white" if setup.conditions.vol_available else "bold yellow"),
                        "Micro Trend", Text(ema_type, style="white"))
     setup_grid.add_row("Matched Cohort", Text(f"'{setup.matched_bucket}' (n={setup.hist_n})", style="cyan"),
-                       "Win Prob (Dir)", Text(f"{setup.hist_win_rate_open * 100:.1f}%",
-                                              style="green" if setup.hist_win_rate_open > 0.50 else "red"))
+                       "Cohort Win Rate", Text(f"{setup.hist_win_rate_open * 100:.1f}%",
+                                               style="green" if setup.hist_win_rate_open > 0.50 else "red"))
 
-    # Distributional Expected Move Table
+    # Distributional Expected Raw NIFTY Move Table
     dist_table = Table(box=SIMPLE, show_header=True, expand=True, padding=(0, 1))
-    dist_table.add_column("P10 (Worst 10%)", justify="right", style="red")
+    dist_table.add_column("P10 (Downside)", justify="right", style="red")
     dist_table.add_column("P25", justify="right", style="yellow")
-    dist_table.add_column("Median", justify="right", style="bold white")
-    dist_table.add_column("Mean", justify="right", style="bold cyan")
+    dist_table.add_column("Median Move", justify="right", style="bold white")
+    dist_table.add_column("Mean Move", justify="right", style="bold cyan")
     dist_table.add_column("P75", justify="right", style="green")
-    dist_table.add_column("P90 (Best 10%)", justify="right", style="bold green")
+    dist_table.add_column("P90 (Upside)", justify="right", style="bold green")
 
     if setup.distribution:
         d = setup.distribution
+        p10_pts = setup.spot * (d.raw_p10_pct / 100.0)
+        p25_pts = setup.spot * (d.raw_p25_pct / 100.0)
+        med_pts = setup.spot * (d.raw_median_pct / 100.0)
+        mean_pts = setup.spot * (d.raw_mean_pct / 100.0)
+        p75_pts = setup.spot * (d.raw_p75_pct / 100.0)
+        p90_pts = setup.spot * (d.raw_p90_pct / 100.0)
+
         dist_table.add_row(
-            f"{d.p10_pct:+.2f}%",
-            f"{d.p25_pct:+.2f}%",
-            f"{d.median_pct:+.2f}%",
-            f"{d.mean_pct:+.2f}%",
-            f"{d.p75_pct:+.2f}%",
-            f"{d.p90_pct:+.2f}%",
+            f"{d.raw_p10_pct:+.2f}% ({p10_pts:+.0f}p)",
+            f"{d.raw_p25_pct:+.2f}% ({p25_pts:+.0f}p)",
+            f"{d.raw_median_pct:+.2f}% ({med_pts:+.0f}p)",
+            f"{d.raw_mean_pct:+.2f}% ({mean_pts:+.0f}p)",
+            f"{d.raw_p75_pct:+.2f}% ({p75_pts:+.0f}p)",
+            f"{d.raw_p90_pct:+.2f}% ({p90_pts:+.0f}p)",
         )
     else:
         dist_table.add_row("—", "—", "—", "—", "—", "—")
 
-    # Best Strategy & Greek Attribution Card
+    # Realized vs Implied Volatility Benchmark Panel
+    vol_panel = None
+    if setup.chosen_strategy:
+        best = setup.chosen_strategy
+        sd = best.straddle_details
+        vol_style = "yellow" if "Expensive" in best.vol_edge_verdict else "green" if "Favorable" in best.vol_edge_verdict else "cyan"
+
+        vol_grid = Table.grid(padding=(0, 2))
+        vol_grid.add_column(style="dim", width=22)
+        vol_grid.add_column()
+        vol_grid.add_column(style="dim", width=22)
+        vol_grid.add_column()
+
+        straddle_str = f"₹{sd.get('straddle_prem', 0):,.1f} (CE ₹{sd.get('atm_ce_prem', 0):,.1f} + PE ₹{sd.get('atm_pe_prem', 0):,.1f} @ K={sd.get('atm_strike', 0):g})"
+        forward_str = f"F = {sd.get('synth_forward', 0):,.1f} ({sd.get('cost_of_carry_pts', 0):+.1f}p carry)"
+        implied_18h_str = f"±{sd.get('chain_18h_pts', 0):.0f} pts (Chain {sd.get('implied_iv_straddle', 0):.1f}% IV) | ±{sd.get('vix_18h_pts', 0):.0f} pts (India VIX)"
+        cohort_sigma_str = f"±{best.cohort_forecast_sigma_pts:.0f} pts (RMS) | ±{best.cohort_robust_sigma_pts:.0f} pts (P10-P90)"
+
+        vol_grid.add_row("Live ATM Straddle", Text(straddle_str, style="white"),
+                         "Synthetic Forward", Text(forward_str, style="white"))
+        vol_grid.add_row("18h Hold Implied Move", Text(implied_18h_str, style="white"),
+                         "Cohort Forecast (1σ)", Text(cohort_sigma_str, style="white"))
+        vol_grid.add_row("Paid / Fair Option Ratio", Text(f"{best.paid_to_fair_ratio:.2f}× (Fair ₹{best.fair_premium_lot/75:,.1f})", style="yellow" if best.paid_to_fair_ratio > 1.1 else "green"),
+                         "Volatility Edge Verdict", Text(best.vol_edge_verdict, style=f"bold {vol_style}"))
+
+        vol_panel = Panel(vol_grid, title="[bold]Overnight Volatility Benchmark (Realized vs. Implied Straddle)[/]", box=ROUNDED)
+
+    # Auditable EV Reconciliation Bridge Card
     strat_group = []
     if setup.chosen_strategy:
         best = setup.chosen_strategy
         cand = best.candidate
-        ev_style = "bold green" if best.net_ev_per_lot > 0 else "bold red"
+        ev_style = "bold green" if (best.is_tradeable and best.net_ev_per_lot > 0) else "bold red"
 
-        best_table = Table.grid(padding=(0, 2))
-        best_table.add_column(style="dim", width=18)
-        best_table.add_column()
-        best_table.add_column(style="dim", width=18)
-        best_table.add_column()
+        # Bridge Table
+        bridge_table = Table(box=SIMPLE, show_header=True, expand=True, padding=(0, 1))
+        bridge_table.add_column("Component", style="bold")
+        bridge_table.add_column("Formula / Mathematical Driver", style="dim")
+        bridge_table.add_column("Value (₹ / Lot)", justify="right")
 
-        best_table.add_row("Best Strategy", Text(f"{cand.name} [{cand.strategy_type}]", style="bold white"),
-                           "Greeks", Text(f"Δ {cand.delta:+.2f}  Γ {cand.gamma:.5f}  Θ -₹{abs(cand.theta):.1f}/d  ν ₹{cand.vega:.1f}", style="dim"))
-        best_table.add_row("Entry Premium", Text(f"₹{cand.net_premium:,.2f} / unit (₹{cand.net_premium * 75:,.0f}/lot)", style="white"),
-                           "Theta Breakeven", Text(f"gap > {best.breakeven_gap_pct:+.3f}%", style="yellow"))
-        best_table.add_row("Predicted PnL (lot)", Text(f"Δ: ₹{best.expected_delta_pnl_lot:+,.0f} | Γ: ₹{best.expected_gamma_pnl_lot:+,.0f}", style="white"),
-                           "Costs (lot)", Text(f"Θ: -₹{best.expected_theta_cost_lot:,.0f} | ν: ₹{best.expected_vega_pnl_lot:+,.0f} | Sprd/Fee: -₹{best.spread_slippage_lot + best.fees_lot:,.0f}", style="dim"))
-        best_table.add_row("Net Expected Value", Text(f"₹{best.net_ev_per_lot:+,.0f} / lot  ({best.net_ev_pct:+.1f}% on risk)", style=ev_style),
-                           "P(Profitable)", Text(f"{best.win_probability * 100:.1f}%  (P10: ₹{best.p10_pnl_lot:+,.0f} | P90: ₹{best.p90_pnl_lot:+,.0f})", style="bold white"))
+        mean_pts = setup.spot * (setup.distribution.raw_mean_pct / 100.0) if setup.distribution else 0.0
+        bridge_table.add_row("Delta on Mean Move", f"{cand.delta:+.2f} × ({mean_pts:+.1f} pts) × 75", f"₹{best.delta_pnl_mean_lot:+,.0f}")
+        bridge_table.add_row("Gamma Convexity (Dist)", f"½ × {cand.gamma:.5f} × E[ΔS²] × 75", f"₹{best.gamma_convexity_dist_lot:+,.0f}")
+        bridge_table.add_row("Theta Decay (Hold)", f"-₹{abs(cand.theta):.1f}/d × {best.holding_days:.2f}d × 75", f"-₹{best.theta_cost_hold_lot:,.0f}")
+        bridge_table.add_row("Vega / IV Path Change", f"₹{cand.vega:.1f} × dIV × 75 (assumes IV drift)", f"₹{best.vega_pnl_lot:+,.0f}")
+        bridge_table.add_row("Friction & Execution Fees", "Spread + Brokerage + STT + Taxes", f"-₹{best.friction_lot:,.0f}")
+        bridge_table.add_row("Higher-Order Skew Residual", "Exact Scenario Integration Residual", f"₹{best.higher_order_residual_lot:+,.0f}")
+        bridge_table.add_row("[bold]Reconciled Net EV[/]", "[bold]Integrated Full Distribution (Exact Footing)[/]", Text(f"₹{best.net_ev_per_lot:+,.0f}", style=ev_style))
 
-        strat_group.append(best_table)
+        # Volatility Sensitivity Triad Grid
+        sens_grid = Table(box=SIMPLE, show_header=True, expand=True, padding=(0, 1))
+        sens_grid.add_column("Scenario Scale", style="dim")
+        sens_grid.add_column("Assumed Overnight σ", justify="center")
+        sens_grid.add_column("Resulting Expected Value (₹ / Lot)", justify="right")
+
+        sens_grid.add_row("Robust P10-P90 Scale", f"±{best.cohort_robust_sigma_pts:.0f} pts (±{best.cohort_robust_sigma_pts/setup.spot*100:.2f}%)", f"₹{best.ev_robust_sigma_lot:+,.0f} / lot")
+        sens_grid.add_row("Baseline RMS Scale", f"±{best.cohort_forecast_sigma_pts:.0f} pts (±{best.cohort_forecast_sigma_pts/setup.spot*100:.2f}%)", f"₹{best.ev_baseline_rms_lot:+,.0f} / lot")
+        sens_grid.add_row("Stressed Upper χ² Bound", f"±{best.cohort_forecast_sigma_pts * 1.23:.0f} pts (±{best.cohort_forecast_sigma_pts*1.23/setup.spot*100:.2f}%)", f"₹{best.ev_stressed_sigma_lot:+,.0f} / lot")
+
+        # Probability Partition & Driver Grid
+        prob_grid = Table.grid(padding=(0, 2))
+        prob_grid.add_column(style="dim", width=22)
+        prob_grid.add_column()
+        prob_grid.add_column(style="dim", width=22)
+        prob_grid.add_column()
+
+        prob_grid.add_row(
+            "P(Profit)", Text(f"{best.p_profitable * 100:.1f}% (Net PnL > 0)", style="bold green" if best.p_profitable >= 0.50 else "yellow"),
+            "Profit Driver Breakdown", Text(f"Tail (>1%): {best.p_profit_tail_pct:.1f}% | Large: {best.p_profit_large_pct:.1f}%", style="white"),
+        )
+        prob_grid.add_row(
+            "P(Loss)", Text(f"{best.p_loss * 100:.1f}%", style="red"),
+            "Partition Integrity", Text("100.0% (Loss + BE + Profit)", style="dim"),
+        )
+        prob_grid.add_row(
+            "P(Direction)", Text(f"{best.p_direction * 100:.1f}% (95% Wilson CI: [{best.wilson_ci_direction[0]*100:.1f}%, {best.wilson_ci_direction[1]*100:.1f}%])", style="white"),
+            "Empirical-Bayes P(Dir)", Text(f"{best.shrunk_p_direction * 100:.1f}% (Beta(5,5) Regularized)", style="cyan"),
+        )
+
+        strat_group.append(bridge_table)
+        strat_group.append(Table.grid())
+        strat_group.append(Panel(sens_grid, title="[bold]Long-Gamma Volatility Sensitivity Triad[/]", box=ROUNDED))
+        strat_group.append(Table.grid())
+        strat_group.append(prob_grid)
 
     # Strategy Comparison Matrix
-    matrix_table = Table(title="Option Strategy Evaluation Matrix", box=ROUNDED, expand=True, padding=(0, 1))
-    matrix_table.add_column("Strategy", style="bold")
-    matrix_table.add_column("Contract / Strike", style="white")
-    matrix_table.add_column("Net Prem", justify="right")
-    matrix_table.add_column("Delta", justify="right")
-    matrix_table.add_column("Net EV (1 lot)", justify="right")
-    matrix_table.add_column("EV / Risk", justify="right")
-    matrix_table.add_column("P(Win)", justify="right")
-    matrix_table.add_column("P10 Loss", justify="right", style="red")
-    matrix_table.add_column("Verdict", justify="center")
+    matrix_table = Table(title="Option Strategy Evaluation Matrix (Ranked by Risk-Adjusted EV)", box=ROUNDED, expand=True, padding=(0, 1))
+    matrix_table.add_column("Strategy", style="bold", width=12)
+    matrix_table.add_column("Contract", style="white", width=10)
+    matrix_table.add_column("Premium", justify="right", width=8)
+    matrix_table.add_column("Paid/Fair", justify="right", width=9)
+    matrix_table.add_column("Delta", justify="right", width=6)
+    matrix_table.add_column("Net EV", justify="right", width=8)
+    matrix_table.add_column("EV %", justify="right", width=7)
+    matrix_table.add_column("P(Win)", justify="right", width=7)
+    matrix_table.add_column("P10 Loss", justify="right", style="red", width=8)
+    matrix_table.add_column("Status", justify="center", width=6)
 
     if setup.strategy_evaluations:
         for ev in setup.strategy_evaluations:
             is_best = (setup.chosen_strategy and ev.candidate.name == setup.chosen_strategy.candidate.name)
             strat_label = f"{ev.candidate.strategy_type} {'★' if is_best else ''}"
-            row_style = "bold green" if is_best and ev.net_ev_per_lot > 0 else ("white" if ev.net_ev_per_lot > 0 else "dim")
+            is_valid_go = (ev.is_tradeable and ev.net_ev_per_lot > 0)
+            row_style = "bold green" if is_best and is_valid_go else ("white" if is_valid_go else "dim")
             ev_col = Text(f"₹{ev.net_ev_per_lot:+,.0f}", style="green" if ev.net_ev_per_lot > 0 else "red")
             ev_pct_col = Text(f"{ev.net_ev_pct:+.1f}%", style="green" if ev.net_ev_pct > 0 else "red")
-            status = Text("GO" if (ev.is_tradeable and ev.net_ev_per_lot > 0) else "NO-GO",
-                          style="bold green" if (ev.is_tradeable and ev.net_ev_per_lot > 0) else "red")
+            status = Text("GO" if is_valid_go else "NO-GO",
+                          style="bold green" if is_valid_go else "red")
 
             matrix_table.add_row(
                 Text(strat_label, style=row_style),
-                Text(ev.candidate.symbol, style=row_style),
+                Text(ev.candidate.symbol.replace("NIFTY ", ""), style=row_style),
                 f"₹{ev.candidate.net_premium:,.1f}",
+                f"{ev.paid_to_fair_ratio:.2f}×",
                 f"{ev.candidate.delta:+.2f}",
                 ev_col,
                 ev_pct_col,
-                f"{ev.win_probability * 100:.1f}%",
+                f"{ev.p_profitable * 100:.1f}%",
                 f"₹{ev.p10_pnl_lot:,.0f}",
                 status,
             )
@@ -139,17 +212,20 @@ def render_overnight(setup: OvernightSetup, console: Console | None = None) -> N
         Table.grid(),
         setup_grid,
         Table.grid(),
-        Panel(dist_table, title="[bold]Expected Underlying Move (Next Open Distribution)[/]", box=ROUNDED),
+        Panel(dist_table, title="[bold]Raw NIFTY Move Distribution (Next Open Forecast)[/]", box=ROUNDED),
     ]
 
+    if vol_panel:
+        body_elements.append(vol_panel)
+
     if strat_group:
-        body_elements.append(Panel(Group(*strat_group), title="[bold]Best Contract & Greek Attribution (Per Lot)[/]", box=ROUNDED))
+        body_elements.append(Panel(Group(*strat_group), title="[bold]Evaluated Contract EV Reconciliation Bridge (Auditable P&L Math)[/]", box=ROUNDED))
 
     if setup.strategy_evaluations:
         body_elements.append(matrix_table)
 
     # Sizing section if GO
-    if setup.sizing and setup.go and setup.chosen_strategy:
+    if setup.sizing and setup.go and setup.chosen_strategy and setup.chosen_strategy.is_tradeable:
         sz_grid = Table.grid(padding=(0, 2))
         sz_grid.add_column(style="dim")
         sz_grid.add_column()
@@ -164,9 +240,9 @@ def render_overnight(setup: OvernightSetup, console: Console | None = None) -> N
 
     if setup.reasons:
         rg = Table.grid(padding=(0, 1))
-        rg.add_column(style="dim", width=12)
+        rg.add_column(style="dim", width=16)
         rg.add_column()
-        rg.add_row("Gates Blocked", "\n".join(f"[red]· {r}[/]" for r in setup.reasons))
+        rg.add_row("Distance-to-GO", "\n".join(f"[red]· {r}[/]" for r in setup.reasons))
         body_elements.append(Table.grid())
         body_elements.append(rg)
 

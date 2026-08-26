@@ -21,6 +21,8 @@ from config import SETTINGS
 from data import nifty
 from data import options as opts
 from journal.db import shared_journal
+from journal.overnight_db import shared_overnight_journal
+from journal.overnight_perf import compute_overnight_performance
 from journal.performance import all_breakdowns, summarize
 from strategies.base import DEFAULT_STRATEGY
 from tui import views
@@ -56,6 +58,7 @@ class NiftyTerminal(App):
         Binding("4", "tab('signals')", "Signals", show=False),
         Binding("5", "tab('journal')", "Journal", show=False),
         Binding("6", "tab('performance')", "Performance", show=False),
+        Binding("7", "tab('overnight')", "Overnight", show=False),
         Binding("r", "force_refresh", "Refresh"),
         Binding("e", "next_expiry", "Expiry"),
         Binding("c", "copy_context", "Copy"),
@@ -67,6 +70,8 @@ class NiftyTerminal(App):
         self.state = TerminalState()
         self.journal_filter = "all"
         self.journal_search: str | None = None
+        self.oj_filter = "all"
+        self.oj_search: str | None = None
 
     # -- layout -------------------------------------------------------------
 
@@ -78,10 +83,13 @@ class NiftyTerminal(App):
                 ("market", "1 Market"), ("technicals", "2 Technicals"),
                 ("options", "3 Options"), ("signals", "4 Signals"),
                 ("journal", "5 Journal"), ("performance", "6 Performance"),
+                ("overnight", "7 Overnight"),
             ):
                 with TabPane(title=title, id=tab_id):
                     if tab_id == "journal":
                         yield Input(placeholder=views.JOURNAL_HELP.replace("[bold]", "").replace("[/bold]", ""), id="journal-input")
+                    elif tab_id == "overnight":
+                        yield Input(placeholder=views.OVERNIGHT_JOURNAL_HELP.replace("[bold]", "").replace("[/bold]", ""), id="overnight-input")
                     yield VerticalScroll(Static("", classes="panel-holder"), id=f"scroll-{tab_id}")
         yield Footer()
 
@@ -160,6 +168,47 @@ class NiftyTerminal(App):
         self._render_signals()
         self._render_journal()
         self._render_performance()
+        self._render_overnight_journal()
+
+    def _render_overnight_journal(self) -> None:
+        holder = self._holder("overnight")
+        oj = shared_overnight_journal()
+        
+        # Determine filter params
+        decision_filter = "all"
+        trade_type = "all"
+        dir_filter = "all"
+        if self.oj_filter == "go":
+            decision_filter = "GO"
+        elif self.oj_filter == "no-go":
+            decision_filter = "NO-GO"
+        elif self.oj_filter == "actual":
+            trade_type = "actual"
+        elif self.oj_filter == "hypo":
+            trade_type = "hypothetical"
+        elif self.oj_filter in ("ce", "bullish"):
+            dir_filter = "bullish"
+        elif self.oj_filter in ("pe", "bearish"):
+            dir_filter = "bearish"
+
+        records = oj.list(
+            decision=decision_filter,
+            direction=dir_filter,
+            trade_type=trade_type,
+            search=self.oj_search,
+            limit=100,
+        )
+        perf = compute_overnight_performance(journal=oj)
+        
+        title = (
+            f"[bold]OVERNIGHT TRADE JOURNAL[/bold] — filter={self.oj_filter}"
+            f"{' search=' + repr(self.oj_search) if self.oj_search else ''} · {len(records)} runs"
+        )
+        parts = [
+            views.overnight_performance_panel(perf),
+            views.overnight_journal_table(records, title=title),
+        ]
+        self._set(holder, *parts)
 
     def _render_market(self) -> None:
         hist = self.state.history
@@ -280,22 +329,79 @@ class NiftyTerminal(App):
     # -- journal input handling -----------------------------------------------
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "journal-input":
-            return
         raw = event.value.strip()
         event.input.clear()
         if not raw:
             return
-        feedback = self._run_journal_command(raw)
-        if feedback:
-            try:
-                self.copy_to_clipboard(feedback)
-                feedback += "   [copied to clipboard]"
-            except Exception:
-                pass
-            self.notify(feedback, severity="information", timeout=6)
-        self._render_journal()
-        self._render_performance()
+
+        if event.input.id == "journal-input":
+            feedback = self._run_journal_command(raw)
+            if feedback:
+                try:
+                    self.copy_to_clipboard(feedback)
+                    feedback += "   [copied to clipboard]"
+                except Exception:
+                    pass
+                self.notify(feedback, severity="information", timeout=6)
+            self._render_journal()
+            self._render_performance()
+        elif event.input.id == "overnight-input":
+            feedback = self._run_overnight_journal_command(raw)
+            if feedback:
+                try:
+                    self.copy_to_clipboard(feedback)
+                    feedback += "   [copied to clipboard]"
+                except Exception:
+                    pass
+                self.notify(feedback, severity="information", timeout=6)
+            self._render_overnight_journal()
+
+    def _run_overnight_journal_command(self, raw: str) -> str | None:
+        oj = shared_overnight_journal()
+        parts = shlex.split(raw)
+        cmd, args = parts[0].lower(), parts[1:]
+        if cmd == "oj" and args:
+            cmd, args = args[0].lower(), args[1:]
+
+        try:
+            match cmd:
+                case "filter":
+                    if args and args[0] in ("all", "go", "no-go", "actual", "hypo", "ce", "pe", "bullish", "bearish"):
+                        self.oj_filter = args[0]
+                        return f"filtered overnight journal → {args[0]}"
+                    return "filter must be all|go|no-go|actual|hypo|ce|pe"
+                case "search":
+                    self.oj_search = " ".join(args) or None
+                    return f"search overnight journal → {self.oj_search}" if self.oj_search else "cleared search"
+                case "settle":
+                    if len(args) < 2:
+                        return "usage: settle <id> <exit_price>"
+                    rec_id = int(args[0])
+                    exit_p = float(args[1])
+                    rec = oj.settle(rec_id, exit_p)
+                    if rec:
+                        return f"settled #{rec_id} ({rec.contract_name}) @ ₹{exit_p:.2f} → P&L {rec.pnl_display} ({rec.outcome})"
+                    return f"record #{rec_id} not found"
+                case "run":
+                    from model.overnight_card import build_overnight_setup
+                    candles = self.state.history.candles if self.state.history else []
+                    if not candles:
+                        return "no market history loaded"
+                    setup = build_overnight_setup(candles, self.state.chain)
+                    return f"evaluated overnight setup → {setup.verdict} ({setup.composite.direction.value.upper()}, score {setup.composite.score:.0f})"
+                case "show":
+                    if not args:
+                        return "usage: show <id>"
+                    rec = oj.get(int(args[0]))
+                    if not rec:
+                        return f"record #{args[0]} not found"
+                    return f"#{rec.id} | {rec.trade_date} | {rec.decision} {rec.contract_name} | EV lot ₹{rec.expected_value_lot or 0:,.0f} | P&L: {rec.pnl_display} | Gates: {rec.blocked_reasons or 'None'}"
+                case "help":
+                    return views.OVERNIGHT_JOURNAL_HELP
+                case _:
+                    return f"unknown overnight command {cmd!r} — try help"
+        except (IndexError, ValueError) as exc:
+            return f"bad overnight command: {exc}"
 
     def _current_states(self) -> dict[str, str]:
         out = {}

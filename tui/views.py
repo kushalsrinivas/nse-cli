@@ -286,6 +286,101 @@ JOURNAL_HELP = (
 
 
 # ---------------------------------------------------------------------------
+# Overnight Trade Journal Tab
+# ---------------------------------------------------------------------------
+
+def overnight_journal_table(records: list, title: str) -> Panel:
+    table = Table(box=box.SIMPLE, expand=True, header_style="bold cyan")
+    table.add_column("ID", width=4)
+    table.add_column("Date", style="grey50", width=10)
+    table.add_column("NIFTY", justify="right", width=10)
+    table.add_column("Dir", justify="center", width=5)
+    table.add_column("Decision", justify="center", width=8)
+    table.add_column("Conf", justify="right", width=5)
+    table.add_column("Contract", width=16)
+    table.add_column("Entry", justify="right", width=8)
+    table.add_column("Exit", justify="right", width=8)
+    table.add_column("P&L", justify="right", width=11)
+    table.add_column("Outcome", justify="center", width=9)
+    table.add_column("Rationale / Blocked Gates")
+
+    for r in records:
+        dec_style = "bold green" if r.decision == "GO" else "bold red"
+        dir_style = "green" if r.direction == "bullish" else "red" if r.direction == "bearish" else "yellow"
+        dir_label = "CE" if r.direction == "bullish" else "PE" if r.direction == "bearish" else "—"
+
+        pnl = r.effective_pnl
+        if pnl is not None:
+            pnl_col = "bright_green" if pnl > 0 else "bright_red" if pnl < 0 else "white"
+            star = "" if r.is_actual_trade else "*"
+            pnl_text = Text(f"{pnl:+,.0f}{star}", style=pnl_col)
+        else:
+            pnl_text = Text("—", style="grey50")
+
+        exit_val = r.effective_exit
+        exit_str = f"₹{exit_val:,.1f}" if exit_val is not None else "—"
+        entry_str = f"₹{r.entry_price:,.1f}" if r.entry_price is not None else "—"
+
+        out_style = "green" if r.outcome == "WIN" else "red" if r.outcome == "LOSS" else "yellow" if r.outcome == "BREAKEVEN" else "grey50"
+        
+        gate_info = r.blocked_reasons if r.decision == "NO-GO" and r.blocked_reasons else (r.decision_rationale or r.notes or "")
+        gate_text = gate_info[:55] + ("…" if len(gate_info) > 55 else "")
+
+        table.add_row(
+            str(r.id),
+            r.trade_date,
+            f"{r.nifty_close:,.1f}",
+            Text(dir_label, style=dir_style),
+            Text(r.decision, style=dec_style),
+            f"{r.confidence_score:.0f}",
+            r.contract_name.replace("NIFTY ", "") if r.contract_name else "—",
+            entry_str,
+            exit_str,
+            pnl_text,
+            Text(r.outcome, style=out_style),
+            gate_text,
+        )
+
+    subtitle = "[dim]* Hypothetical counterfactual result — no trade taken[/dim]"
+    return Panel(table, title=title, subtitle=subtitle, box=box.ROUNDED)
+
+
+def overnight_performance_panel(summary) -> Panel:
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="grey50", justify="right", width=22)
+    grid.add_column(width=16)
+    grid.add_column(style="grey50", justify="right", width=22)
+    grid.add_column()
+
+    pnl_col = "bright_green" if summary.go_net_pnl >= 0 else "bright_red"
+    eff_col = "bright_green" if summary.filter_efficiency_pct >= 60 else "yellow"
+
+    grid.add_row("Total Engine Runs", str(summary.total_runs),
+                 "GO Win Rate", f"{summary.go_win_rate * 100:.1f}% ({summary.go_wins}W / {summary.go_losses}L)")
+    grid.add_row("GO Signals (Executed)", str(summary.go_count),
+                 "Cumulative Net P&L", Text(f"₹{summary.go_net_pnl:+,.0f}", style=f"bold {pnl_col}"))
+    grid.add_row("NO-GO Signals (Filtered)", str(summary.nogo_count),
+                 "Average Trade P&L", f"₹{summary.go_avg_pnl:+,.0f}")
+    grid.add_row("Actual Trades Settled", str(summary.settled_actual),
+                 "Profit Factor", f"{summary.go_profit_factor:.2f}" if summary.go_profit_factor else "—")
+    grid.add_row("NO-GO Avoided Losses", Text(f"{summary.avoided_losses_count} runs (saved ₹{summary.avoided_losses_rupees:,.0f})", style="bright_green"),
+                 "Best Trade", f"₹{summary.go_best_trade:+,.0f}" if summary.go_best_trade else "—")
+    grid.add_row("NO-GO Missed Winners", Text(f"{summary.missed_winners_count} runs (missed ₹{summary.missed_winners_rupees:,.0f})", style="yellow"),
+                 "Worst Trade", f"₹{summary.go_worst_trade:+,.0f}" if summary.go_worst_trade else "—")
+    grid.add_row("NO-GO Filter Efficiency", Text(f"{summary.filter_efficiency_pct:.1f}%", style=f"bold {eff_col}"),
+                 "Settled Hypotheticals", f"{summary.settled_hypothetical} runs")
+
+    return Panel(grid, title="[bold]OVERNIGHT STRATEGY AUDIT & PERFORMANCE[/bold]", box=box.ROUNDED)
+
+
+OVERNIGHT_JOURNAL_HELP = (
+    "[bold]oj filter[/bold] all|go|no-go|actual|hypo|ce|pe · "
+    "[bold]oj settle[/bold] <id> <exit_price> · "
+    "[bold]oj search[/bold] <text> · [bold]oj show[/bold] <id> · [bold]oj run[/bold]"
+)
+
+
+# ---------------------------------------------------------------------------
 # Performance tab
 # ---------------------------------------------------------------------------
 

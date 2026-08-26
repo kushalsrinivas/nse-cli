@@ -1,20 +1,25 @@
 """Nightly overnight-setup decision engine.
 
 Runs the technical model on today's close, extracts the empirical distribution
-of overnight gaps for the matched setup cohort, evaluates candidate option
+of overnight raw market moves for the matched setup cohort, evaluates candidate option
 structures (ITM single-leg, ATM single-leg control, and Debit Spreads) through
 the 2nd-order Greek EV engine, and emits a rigorous GO / NO-GO decision.
 
 Hard Gates:
-    1. Thin volume (rel volume < 0.8x) -> Hard Block
-    2. Expiry / calendar risk -> Hard Block
-    3. Option liquidity / bad spreads -> Hard Block
-    4. Net Expected Value <= 0 -> Hard Block (decay & friction overwhelm edge)
+    1. Volume verification: Unavailable feed or thin volume (<0.8x) -> Hard Block (Fail-Closed)
+    2. Directional confidence < 65 or Neutral -> Hard Block
+    3. Directional probability P(Direction) <= 50% -> Hard Block
+    4. Expiry / calendar risk -> Hard Block
+    5. Option liquidity / bad spreads -> Hard Block
+    6. Net Expected Value <= 0 -> Hard Block (decay & friction overwhelm edge)
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
 import numpy as np
 
 from analysis.signals import Direction
@@ -28,10 +33,18 @@ from model.options_ev import (
     StrategyEV,
     generate_strategy_candidates,
     rank_and_select_best_strategy,
+    wilson_score_interval,
 )
 from model.regime import RegimeProfile
 from model.risk import RiskManager, SizingResult
 from model.weights import WeightSet
+
+
+class CloseLocation(str, Enum):
+    STRONG_BREAKOUT = "strong breakout (pos >= 0.70, near high)"
+    STRONG_BREAKDOWN = "strong breakdown (pos <= 0.30, near low)"
+    FADED_INTO_CLOSE = "faded into close (0.35 <= pos <= 0.65)"
+    MID_RANGE = "mid-range close (normal)"
 
 
 @dataclass(frozen=True)
@@ -39,11 +52,11 @@ class Conditions:
     """The EOD state features that drive bucket matching."""
 
     score: float
-    strong_close: bool
-    weak_close: bool
+    close_location: CloseLocation
     vol_spike: bool
     thin_volume: bool
     with_trend: bool
+    vol_available: bool = True
 
 
 @dataclass
@@ -80,31 +93,48 @@ class OvernightSetup:
 
 # --- condition predicates shared between history and tonight ---------------
 
+def _derive_close_location(close_pos: float, direction: Direction) -> CloseLocation:
+    if direction is Direction.BULLISH and close_pos >= 0.70:
+        return CloseLocation.STRONG_BREAKOUT
+    if direction is Direction.BEARISH and close_pos <= 0.30:
+        return CloseLocation.STRONG_BREAKDOWN
+    if 0.35 <= close_pos <= 0.65:
+        return CloseLocation.FADED_INTO_CLOSE
+    return CloseLocation.MID_RANGE
+
+
 def signal_conditions(s) -> Conditions:
-    strong = s.close_pos > 0.7 if s.direction is Direction.BULLISH else s.close_pos < 0.3
-    weak = 0.35 < s.close_pos < 0.65
-    vol_ok = not np.isnan(s.rel_volume) and s.rel_volume >= 1.3
-    thin = np.isnan(s.rel_volume) or s.rel_volume < 0.8
-    return Conditions(score=s.score, strong_close=strong, weak_close=weak,
-                      vol_spike=vol_ok, thin_volume=thin, with_trend=s.with_trend)
+    loc = _derive_close_location(s.close_pos, s.direction)
+    vol_valid = not np.isnan(s.rel_volume) and s.rel_volume > 0.0
+    vol_ok = vol_valid and s.rel_volume >= 1.3
+    thin = vol_valid and s.rel_volume < 0.8
+    return Conditions(
+        score=s.score,
+        close_location=loc,
+        vol_spike=vol_ok,
+        thin_volume=thin,
+        with_trend=s.with_trend,
+        vol_available=vol_valid,
+    )
 
 
 def _bucket_defs() -> list[tuple[str, object]]:
     """Ordered most-specific-first; each pred takes a Conditions."""
     return [
-        ("strong close + volume + trend",
-         lambda c: c.strong_close and c.vol_spike and c.with_trend),
-        ("strong close + trend",
-         lambda c: c.strong_close and c.with_trend),
-        ("high conviction + strong close",
-         lambda c: c.score >= 75 and c.strong_close),
+        ("strong breakout + with-trend",
+         lambda c: c.close_location == CloseLocation.STRONG_BREAKOUT and c.with_trend),
+        ("strong breakdown + with-trend",
+         lambda c: c.close_location == CloseLocation.STRONG_BREAKDOWN and c.with_trend),
+        ("strong breakout (pos >= 0.70)",
+         lambda c: c.close_location == CloseLocation.STRONG_BREAKOUT),
+        ("strong breakdown (pos <= 0.30)",
+         lambda c: c.close_location == CloseLocation.STRONG_BREAKDOWN),
         ("high conviction (75+)", lambda c: c.score >= 75),
-        ("strong close", lambda c: c.strong_close),
         ("with EMA-50 trend", lambda c: c.with_trend),
         ("counter-trend", lambda c: not c.with_trend),
         ("rel volume >= 1.3x", lambda c: c.vol_spike),
         ("thin day (<0.8x)", lambda c: c.thin_volume),
-        ("weak close (faded)", lambda c: c.weak_close),
+        ("weak close (faded)", lambda c: c.close_location == CloseLocation.FADED_INTO_CLOSE),
     ]
 
 
@@ -128,6 +158,7 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     from analysis.signals import Direction as Dir
     from model.backtest import _base_frame
     from model.journal import SetupJournal, SetupRecord, now_iso
+    from model.macro import fetch_macro_history
     from model.overnight import (
         _expiry_weekday,
         apply_discipline,
@@ -147,18 +178,22 @@ def build_overnight_setup(candles, chain: OptionChain | None,
 
     close_pos = ((float(row["close"]) - float(row["low"])) / rng) if rng > 0 else 0.5
     rel_raw = row.get("rel_volume")
-    rel_vol = float(rel_raw) if rel_raw is not None and not np.isnan(rel_raw) else float("nan")
+    
+    # Null vs Zero check: Index feeds with 0/missing volume are marked unavailable
+    vol_valid = rel_raw is not None and not np.isnan(rel_raw) and float(rel_raw) > 0.0
+    rel_vol = float(rel_raw) if vol_valid else float("nan")
+
     sign = 1 if base.composite.direction is Dir.BULLISH else -1
     with_trend = (float(row["ema9"]) > float(row["ema50"])) == (sign > 0)
-    strong_close = close_pos > 0.7 if sign > 0 else close_pos < 0.3
+    close_loc = _derive_close_location(close_pos, base.composite.direction)
 
     conds = Conditions(
         score=base.composite.score,
-        strong_close=strong_close,
-        weak_close=0.35 < close_pos < 0.65,
-        vol_spike=(not np.isnan(rel_vol)) and rel_vol >= 1.3,
-        thin_volume=np.isnan(rel_vol) or rel_vol < 0.8,
+        close_location=close_loc,
+        vol_spike=vol_valid and rel_vol >= 1.3,
+        thin_volume=vol_valid and rel_vol < 0.8,
         with_trend=with_trend,
+        vol_available=vol_valid,
     )
 
     setup = OvernightSetup(
@@ -180,34 +215,40 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     setup.matched_bucket = label
     setup.hist_n = len(subset)
     if subset:
-        gaps = np.array([s.gap_pct for s in subset])
-        dist = compute_distribution(gaps)
+        raw_gaps = np.array([s.raw_gap_pct for s in subset])
+        dist = compute_distribution(raw_gaps, target_direction=base.composite.direction)
         setup.distribution = dist
-        setup.hist_win_rate_open = dist.p_positive
-        setup.hist_avg_gap_pct = dist.mean_pct
-        setup.hist_p10_gap = dist.p10_pct
-        setup.hist_p90_gap = dist.p90_pct
+        setup.hist_win_rate_open = dist.p_directional_win
+        setup.hist_avg_gap_pct = dist.directional_mean_pct
+        setup.hist_p10_gap = dist.raw_p10_pct
+        setup.hist_p90_gap = dist.raw_p90_pct
         atm_iv = _chain_atm_iv(chain, setup.spot)
         dte = _nearest_dte(chain)
-        setup.outlook = premium_outlook(gaps, setup.spot, atm_iv, dte, settings)
+        setup.outlook = premium_outlook([s.gap_pct for s in subset], setup.spot, atm_iv, dte, settings)
 
-    # --- HARD GATES --------------------------------------------------------
+    # --- HARD GATES & DISTANCE-TO-GO ---------------------------------------
     reasons = []
 
-    # Hard Gate 1: Thin volume is non-negotiable
-    if conds.thin_volume:
-        reasons.append(f"thin volume (rel volume {rel_vol:.2f}x < 0.8x) -> no trade edge")
+    # Hard Gate 1: Fail-Closed Volume Gate (N/A blocks, Thin blocks)
+    if not conds.vol_available:
+        reasons.append("relative volume UNAVAILABLE (index feed missing volume) -> gate unverified (blocking)")
+    elif conds.thin_volume:
+        margin = 0.8 - rel_vol
+        reasons.append(f"thin volume ({rel_vol:.2f}x < 0.8x threshold, need +{margin:.2f}x)")
 
     # Hard Gate 2: Directional score threshold
     if base.composite.score < MIN_TRADEABLE_CONFIDENCE:
-        reasons.append(f"composite confidence {base.composite.score:.0f} below {MIN_TRADEABLE_CONFIDENCE:.0f}")
+        gap_pts = MIN_TRADEABLE_CONFIDENCE - base.composite.score
+        reasons.append(f"composite confidence {base.composite.score:.0f} below {MIN_TRADEABLE_CONFIDENCE:.0f} (need +{gap_pts:.0f} pts)")
     elif base.composite.direction is Dir.NEUTRAL:
         reasons.append("no directional edge (neutral setup)")
 
     # Hard Gate 3: Calendar & Expiry discipline
     entry_ts = frame.index[-1]
+    holding_days = 2.75 if entry_ts.weekday() == 4 else 0.75
+
     if entry_ts.weekday() == 4:
-        reasons.append("Friday entry holds over weekend -> excessive theta decay")
+        reasons.append("Friday entry holds over weekend (66h decay) -> blocked")
     if (entry_ts.weekday() + 1) % 5 == _expiry_weekday(entry_ts):
         kind = classify_next_expiry(entry_ts)
         stakes = "max open interest + max gamma" if kind == "monthly" else "elevated gamma overnight"
@@ -241,27 +282,39 @@ def build_overnight_setup(candles, chain: OptionChain | None,
                 dte=cands[0].dte,
                 regime=setup.regime.regime.value,
             )
+            
+            # Fetch latest India VIX for benchmark
+            vix_val = 10.56
+            try:
+                macro_data = fetch_macro_history("5d")
+                if "indiavix" in macro_data and not macro_data["indiavix"].empty:
+                    vix_val = float(macro_data["indiavix"].iloc[-1])
+            except Exception:
+                pass
+
             best_ev, all_evs = rank_and_select_best_strategy(
                 candidates=cands,
                 spot=setup.spot,
                 dist=setup.distribution,
                 expected_delta_iv=exp_iv_chg,
-                holding_days=1.0,
+                holding_days=holding_days,
                 lot_size=settings.lot_size,
+                vix_level=vix_val,
             )
             setup.strategy_evaluations = all_evs
             setup.chosen_strategy = best_ev
 
-            # Hard Gate 6: Contract Liquidity & Positive Net EV
+            # Hard Gate 6: Positive Net EV and contract liquidity
             if best_ev is None:
                 reasons.append("unable to evaluate strategy candidates")
             else:
                 if not best_ev.is_tradeable:
                     reasons.extend(list(best_ev.rejection_reasons))
                 if best_ev.net_ev_per_lot <= 0:
+                    needed = abs(best_ev.net_ev_per_lot) + 100
                     reasons.append(
                         f"best strategy ({best_ev.candidate.name}) Net EV is negative "
-                        f"(₹{best_ev.net_ev_per_lot:+,.0f}/lot, {best_ev.net_ev_pct:+.1f}%)"
+                        f"(₹{best_ev.net_ev_per_lot:+,.0f}/lot, need +₹{needed:,.0f})"
                     )
 
                 # Sizing calculation if tradeable
@@ -281,8 +334,9 @@ def build_overnight_setup(candles, chain: OptionChain | None,
                     if not result.allowed:
                         reasons.append(result.blocked_reason or "risk manager ceiling")
 
-    setup.reasons = reasons
-    setup.go = (len(reasons) == 0)
+    # Deduplicate reasons list cleanly
+    setup.reasons = list(dict.fromkeys(reasons))
+    setup.go = (len(setup.reasons) == 0)
     _record(setup, journal, events=events)
     return setup
 
@@ -311,6 +365,72 @@ def _nearest_dte(chain: OptionChain | None) -> int:
 
 
 def _record(setup: OvernightSetup, journal, events=None) -> None:
+    # 1. Dedicated Overnight Trade Journal (Records EVERY run: GO, NO-GO, Error)
+    try:
+        from journal.overnight_db import OvernightRunRecord, shared_overnight_journal
+        oj = shared_overnight_journal()
+        ch = setup.chosen_strategy.candidate if setup.chosen_strategy else None
+        ev = setup.chosen_strategy
+        
+        # Extract indicators
+        rsi_a = next((a for a in setup.assessments if "rsi" in a.name.lower()), None)
+        macd_a = next((a for a in setup.assessments if "macd" in a.name.lower()), None)
+        
+        now_dt = datetime.now()
+        run_rec = OvernightRunRecord(
+            id=None,
+            run_id="",
+            timestamp=now_dt.isoformat(timespec="seconds"),
+            trade_date=now_dt.strftime("%Y-%m-%d"),
+            nifty_close=round(setup.spot, 2),
+            market_regime=setup.regime.regime.value,
+            direction=setup.composite.direction.value,
+            decision=setup.verdict,
+            confidence_score=setup.composite.score,
+            option_type=ch.strategy_type if ch else "",
+            option_strike=ch.long_strike if ch else None,
+            contract_name=ch.symbol if ch else "",
+            expiry=ch.expiry if ch else "",
+            entry_price=ch.net_premium if ch else None,
+            expected_exit=round(ch.net_premium * (1 + setup.hist_avg_gap_pct / 100), 2) if ch and ch.net_premium else None,
+            actual_exit_price=None,
+            actual_pnl=None,
+            actual_pnl_pct=None,
+            hypothetical_exit_price=None,
+            hypothetical_pnl=None,
+            hypothetical_pnl_pct=None,
+            outcome="PENDING",
+            is_actual_trade=1 if setup.go else 0,
+            rel_volume=setup.conditions.vol_spike and 1.3 or (setup.conditions.thin_volume and 0.5 or 1.0) if setup.conditions.vol_available else None,
+            close_pos=setup.close_pos,
+            close_location=setup.conditions.close_location.value,
+            micro_trend="with-trend" if setup.conditions.with_trend else "counter-trend",
+            rsi_val=rsi_a.confidence if rsi_a else None,
+            macd_val=macd_a.confidence if macd_a else None,
+            adx_val=getattr(setup.regime, "adx", None),
+            atr_val=None,
+            vix_val=None,
+            matched_bucket=setup.matched_bucket,
+            cohort_n=setup.hist_n,
+            expected_value_lot=ev.net_ev_per_lot if ev else None,
+            expected_value_pct=ev.net_ev_pct if ev else None,
+            p_direction=ev.p_direction if ev else None,
+            p_profitable=ev.p_profitable if ev else None,
+            p10_loss_lot=ev.p10_pnl_lot if ev else None,
+            contracts=setup.sizing.contracts if setup.sizing and setup.go else (1 if ch else None),
+            max_risk=setup.sizing.max_risk_rupees if setup.sizing and setup.go else (ch.net_premium * 75 if ch else None),
+            signal_scores=json.dumps({a.name: a.confidence for a in setup.assessments}),
+            decision_rationale=f"Score {setup.composite.score:.0f}/100 in {setup.regime.label}, matched '{setup.matched_bucket}' (n={setup.hist_n}, win={setup.hist_win_rate_open*100:.1f}%)",
+            blocked_reasons="; ".join(setup.reasons),
+            engine_version="v2.2-ev-dist",
+            notes="; ".join(events) if events else "",
+            created_at=now_dt.isoformat(timespec="seconds"),
+        )
+        oj.add(run_rec)
+    except Exception:
+        pass
+
+    # 2. Legacy Setup Journal (Backwards compatibility)
     try:
         j = journal or SetupJournal()
         ev_txt = f" events={';'.join(events)}" if events else ""
@@ -323,7 +443,7 @@ def _record(setup: OvernightSetup, journal, events=None) -> None:
             direction=setup.composite.direction.value,
             composite_score=setup.composite.score,
             classification=f"OVERNIGHT {setup.verdict}",
-            win_probability=setup.chosen_strategy.win_probability if setup.chosen_strategy else None,
+            win_probability=setup.chosen_strategy.p_profitable if setup.chosen_strategy else None,
             grade=_grade(setup),
             regime=setup.regime.regime.value,
             entry=ch.net_premium if ch else None,
@@ -344,6 +464,6 @@ def _record(setup: OvernightSetup, journal, events=None) -> None:
 def _grade(setup: OvernightSetup) -> str:
     if not setup.go or not setup.chosen_strategy:
         return "F"
-    wr = setup.chosen_strategy.win_probability
+    wr = setup.chosen_strategy.p_profitable
     ev_pct = setup.chosen_strategy.net_ev_pct
     return "A+" if (wr >= 0.60 and ev_pct >= 5.0) else "A" if wr >= 0.55 else "B"

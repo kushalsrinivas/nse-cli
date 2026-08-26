@@ -20,6 +20,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-cache", action="store_true", help="clear cache and refetch")
     parser.add_argument("--classic", action="store_true",
                         help="run the original static Rich dashboard instead of the TUI")
+    parser.add_argument("--overnight-journal", "-oj", action="store_true",
+                        help="view the Overnight Trade Journal and Performance Summary")
+    parser.add_argument("--settle-overnight", nargs=2, metavar=("ID", "EXIT_PRICE"),
+                        help="settle an overnight trade: <id> <exit_price>")
+    parser.add_argument("--oj-filter", default="all",
+                        help="filter overnight journal: all|go|no-go|actual|hypo|ce|pe")
     return parser.parse_args()
 
 
@@ -29,6 +35,39 @@ def main() -> int:
     if args.no_cache:
         removed = shared_cache().clear()
         print(f"cleared {removed} cache entries")
+
+    if args.settle_overnight:
+        from journal.overnight_db import shared_overnight_journal
+        oj = shared_overnight_journal()
+        rec_id = int(args.settle_overnight[0])
+        exit_p = float(args.settle_overnight[1])
+        rec = oj.settle(rec_id, exit_p)
+        if not rec:
+            print(f"Error: overnight record #{rec_id} not found")
+            return 1
+        print(f"Settled #{rec_id} ({rec.contract_name}) @ ₹{exit_p:,.2f} → P&L: {rec.pnl_display} ({rec.outcome})")
+        return 0
+
+    if args.overnight_journal:
+        from rich.console import Console
+        from journal.overnight_db import shared_overnight_journal
+        from journal.overnight_perf import compute_overnight_performance
+        from tui import views
+        
+        console = Console()
+        oj = shared_overnight_journal()
+        
+        dec_filter = "GO" if args.oj_filter == "go" else "NO-GO" if args.oj_filter == "no-go" else "all"
+        trade_type = "actual" if args.oj_filter == "actual" else "hypothetical" if args.oj_filter == "hypo" else "all"
+        dir_filter = "bullish" if args.oj_filter in ("ce", "bullish") else "bearish" if args.oj_filter in ("pe", "bearish") else "all"
+        
+        records = oj.list(decision=dec_filter, direction=dir_filter, trade_type=trade_type, limit=100)
+        perf = compute_overnight_performance(journal=oj)
+        
+        console.print(views.overnight_performance_panel(perf))
+        title = f"[bold]OVERNIGHT TRADE JOURNAL[/bold] — filter={args.oj_filter} ({len(records)} runs)"
+        console.print(views.overnight_journal_table(records, title=title))
+        return 0
 
     if args.classic:
         from ui import terminal
