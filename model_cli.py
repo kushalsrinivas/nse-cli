@@ -181,6 +181,12 @@ def cmd_overnight(args) -> int:
                       "un-modelable; standing rule is NO-GO.")
     render_overnight(setup, console)
 
+    from model.confluence.engine import build_confluence_report
+    from model.confluence.view import render_confluence
+
+    cf_report = build_confluence_report(chain=chain, events=args.event or None)
+    render_confluence(cf_report, console)
+
     snap = live_snapshot()
     if snap:
         from model.macro import format_level
@@ -202,11 +208,14 @@ def cmd_overnight(args) -> int:
 
 def cmd_overnight_journal(args) -> int:
     """Overnight Trade Journal: complete audit of every GO/NO-GO run."""
+    from journal.confluence_db import shared_confluence_journal
+    from journal.confluence_perf import compute_confluence_performance
     from journal.overnight_db import shared_overnight_journal
     from journal.overnight_perf import compute_overnight_performance
     from tui import views
 
     oj = shared_overnight_journal()
+    cj = shared_confluence_journal()
 
     if args.settle:
         rec_id = int(args.settle[0])
@@ -216,6 +225,10 @@ def cmd_overnight_journal(args) -> int:
             console.print(f"[red]overnight record #{rec_id} not found[/]")
             return 1
         console.print(f"[green]settled #{rec_id} ({rec.contract_name}) @ ₹{exit_p:,.2f} → P&L: {rec.pnl_display} ({rec.outcome})[/]")
+
+    setup_map = {"setup-a": "A", "setup-b": "B", "setup-c": "C"}
+    cf_setup = setup_map.get(args.filter, "all")
+    cf_decision = "GO" if args.filter == "go" else "NO-GO" if args.filter == "no-go" else "all"
 
     dec_filter = "GO" if args.filter == "go" else "NO-GO" if args.filter == "no-go" else "all"
     trade_type = "actual" if args.filter == "actual" else "hypothetical" if args.filter == "hypo" else "all"
@@ -227,6 +240,45 @@ def cmd_overnight_journal(args) -> int:
     console.print(views.overnight_performance_panel(perf))
     title = f"[bold]OVERNIGHT TRADE JOURNAL[/bold] — filter={args.filter} ({len(records)} runs)"
     console.print(views.overnight_journal_table(records, title=title))
+
+    cf_records = cj.list(decision=cf_decision, setup_id=cf_setup, search=args.search, limit=args.limit)
+    cf_perf = compute_confluence_performance(journal=cj)
+    console.print()
+    console.print(views.confluence_performance_panel(cf_perf))
+    cf_title = f"[bold]INTRADAY CONFLUENCE JOURNAL[/bold] — filter={args.filter} ({len(cf_records)} runs)"
+    console.print(views.confluence_journal_table(cf_records, title=cf_title))
+    return 0
+
+
+def cmd_confluence_journal(args) -> int:
+    """Confluence setup journal (Setups A/B/C)."""
+    from journal.confluence_db import shared_confluence_journal
+    from journal.confluence_perf import compute_confluence_performance
+    from tui import views
+
+    cj = shared_confluence_journal()
+
+    if args.settle:
+        rec_id = int(args.settle[0])
+        exit_p = float(args.settle[1])
+        rec = cj.settle(rec_id, exit_p, notes=args.notes)
+        if not rec:
+            console.print(f"[red]confluence record #{rec_id} not found[/]")
+            return 1
+        console.print(f"[green]settled #{rec_id} Setup {rec.setup_id} ({rec.contract_name}) "
+                      f"@ ₹{exit_p:,.2f} → P&L: {rec.pnl_display} ({rec.outcome})[/]")
+
+    setup_map = {"setup-a": "A", "setup-b": "B", "setup-c": "C", "a": "A", "b": "B", "c": "C"}
+    setup_id = setup_map.get(args.filter, "all") if args.filter.startswith("setup") or args.filter in ("a", "b", "c") else "all"
+    dec_filter = "GO" if args.filter == "go" else "NO-GO" if args.filter == "no-go" else "all"
+    if setup_id != "all":
+        dec_filter = "all"
+
+    records = cj.list(decision=dec_filter, setup_id=setup_id, search=args.search, limit=args.limit)
+    perf = compute_confluence_performance(journal=cj)
+    console.print(views.confluence_performance_panel(perf))
+    title = f"[bold]INTRADAY CONFLUENCE JOURNAL[/bold] — filter={args.filter} ({len(records)} runs)"
+    console.print(views.confluence_journal_table(records, title=title))
     return 0
 
 
@@ -294,10 +346,17 @@ def main() -> int:
 
     oj = sub.add_parser("overnight-journal", aliases=["oj"], help="audit journal of all overnight runs (GO, NO-GO, hypo)")
     oj.add_argument("--limit", type=int, default=50)
-    oj.add_argument("--filter", default="all", help="filter: all|go|no-go|actual|hypo|ce|pe")
+    oj.add_argument("--filter", default="all", help="filter: all|go|no-go|actual|hypo|ce|pe|setup-a|setup-b|setup-c")
     oj.add_argument("--search", default=None, help="search text")
     oj.add_argument("--settle", nargs=2, metavar=("ID", "EXIT_PRICE"), help="settle an overnight run with open exit price")
     oj.add_argument("--notes", default=None)
+
+    cj = sub.add_parser("confluence-journal", aliases=["cj"], help="audit journal for intraday confluence setups A/B/C")
+    cj.add_argument("--limit", type=int, default=50)
+    cj.add_argument("--filter", default="all", help="filter: all|go|no-go|setup-a|setup-b|setup-c")
+    cj.add_argument("--search", default=None)
+    cj.add_argument("--settle", nargs=2, metavar=("ID", "EXIT_PRICE"))
+    cj.add_argument("--notes", default=None)
 
     args = p.parse_args()
     cmd_map = {
@@ -309,6 +368,8 @@ def main() -> int:
         "research": cmd_research,
         "overnight-journal": cmd_overnight_journal,
         "oj": cmd_overnight_journal,
+        "confluence-journal": cmd_confluence_journal,
+        "cj": cmd_confluence_journal,
     }
     return cmd_map[args.cmd](args)
 

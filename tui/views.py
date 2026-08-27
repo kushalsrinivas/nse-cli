@@ -376,8 +376,91 @@ def overnight_performance_panel(summary) -> Panel:
 OVERNIGHT_JOURNAL_HELP = (
     "[bold]oj filter[/bold] all|go|no-go|actual|hypo|ce|pe · "
     "[bold]oj settle[/bold] <id> <exit_price> · "
-    "[bold]oj search[/bold] <text> · [bold]oj show[/bold] <id> · [bold]oj run[/bold]"
+    "[bold]oj search[/bold] <text> · [bold]oj show[/bold] <id> · [bold]oj run[/bold] · "
+    "[bold]oj cf filter[/bold] all|setup-a|setup-b|setup-c|go|no-go · "
+    "[bold]oj cf settle[/bold] <id> <exit_price>"
 )
+
+
+def confluence_journal_table(records: list, title: str) -> Panel:
+    table = Table(box=box.SIMPLE, expand=True, header_style="bold magenta")
+    table.add_column("ID", width=4)
+    table.add_column("Setup", width=5)
+    table.add_column("Date", style="grey50", width=10)
+    table.add_column("NIFTY", justify="right", width=10)
+    table.add_column("Dir", justify="center", width=5)
+    table.add_column("Decision", justify="center", width=8)
+    table.add_column("Conf", justify="right", width=5)
+    table.add_column("Contract", width=16)
+    table.add_column("Entry", justify="right", width=8)
+    table.add_column("P&L", justify="right", width=11)
+    table.add_column("Outcome", justify="center", width=9)
+    table.add_column("Rationale / Blocked")
+
+    for r in records:
+        dec_style = "bold green" if r.decision == "GO" else "yellow" if r.decision == "WATCH" else "bold red"
+        dir_style = "green" if r.direction == "bullish" else "red" if r.direction == "bearish" else "yellow"
+        dir_label = "CE" if r.direction == "bullish" else "PE" if r.direction == "bearish" else "—"
+
+        pnl = r.effective_pnl
+        if pnl is not None:
+            pnl_col = "bright_green" if pnl > 0 else "bright_red" if pnl < 0 else "white"
+            star = "" if r.is_actual_trade else "*"
+            pnl_text = Text(f"{pnl:+,.0f}{star}", style=pnl_col)
+        else:
+            pnl_text = Text("—", style="grey50")
+
+        entry_str = f"₹{r.entry_price:,.1f}" if r.entry_price is not None else "—"
+        out_style = "green" if r.outcome == "WIN" else "red" if r.outcome == "LOSS" else "yellow" if r.outcome == "BREAKEVEN" else "grey50"
+        gate_info = r.blocked_reasons if r.decision != "GO" and r.blocked_reasons else (r.decision_rationale or r.notes or "")
+        gate_text = gate_info[:55] + ("…" if len(gate_info) > 55 else "")
+
+        table.add_row(
+            str(r.id),
+            Text(r.setup_id, style="bold magenta"),
+            r.trade_date,
+            f"{r.nifty_spot:,.1f}",
+            Text(dir_label, style=dir_style),
+            Text(r.decision, style=dec_style),
+            f"{r.confidence_score:.0f}",
+            r.contract_name.replace("NIFTY ", "") if r.contract_name else "—",
+            entry_str,
+            pnl_text,
+            Text(r.outcome, style=out_style),
+            gate_text,
+        )
+
+    subtitle = "[dim]* Hypothetical counterfactual — A: Momentum · B: ORB · C: Reversal[/dim]"
+    return Panel(table, title=title, subtitle=subtitle, box=box.ROUNDED)
+
+
+def confluence_performance_panel(summary) -> Panel:
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="grey50", justify="right", width=22)
+    grid.add_column(width=16)
+    grid.add_column(style="grey50", justify="right", width=22)
+    grid.add_column()
+
+    pnl_col = "bright_green" if summary.go_net_pnl >= 0 else "bright_red"
+    grid.add_row("Total Confluence Runs", str(summary.total_runs),
+                 "GO Win Rate", f"{summary.go_win_rate * 100:.1f}% ({summary.go_wins}W / {summary.go_losses}L)")
+    grid.add_row("GO Signals", str(summary.go_count),
+                 "Cumulative Net P&L", Text(f"₹{summary.go_net_pnl:+,.0f}", style=f"bold {pnl_col}"))
+    grid.add_row("NO-GO Filtered", str(summary.nogo_count),
+                 "Average Trade P&L", f"₹{summary.go_avg_pnl:+,.0f}")
+    grid.add_row("WATCH (time-gated)", str(summary.watch_count),
+                 "Settled Hypotheticals", str(summary.settled_hypothetical))
+
+    for sid in ("A", "B", "C"):
+        b = summary.by_setup.get(sid, {})
+        grid.add_row(
+            f"Setup {sid} ({b.get('label', '')})",
+            f"{b.get('go_count', 0)} GO / {b.get('runs', 0)} runs",
+            f"Setup {sid} Win Rate",
+            f"{b.get('win_rate', 0) * 100:.1f}% · ₹{b.get('net_pnl', 0):+,.0f}",
+        )
+
+    return Panel(grid, title="[bold]INTRADAY CONFLUENCE AUDIT & PERFORMANCE[/bold]", box=box.ROUNDED)
 
 
 # ---------------------------------------------------------------------------

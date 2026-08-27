@@ -21,6 +21,8 @@ from config import SETTINGS
 from data import nifty
 from data import options as opts
 from journal.db import shared_journal
+from journal.confluence_db import shared_confluence_journal
+from journal.confluence_perf import compute_confluence_performance
 from journal.overnight_db import shared_overnight_journal
 from journal.overnight_perf import compute_overnight_performance
 from journal.performance import all_breakdowns, summarize
@@ -72,6 +74,8 @@ class NiftyTerminal(App):
         self.journal_search: str | None = None
         self.oj_filter = "all"
         self.oj_search: str | None = None
+        self.cf_filter = "all"
+        self.cf_search: str | None = None
 
     # -- layout -------------------------------------------------------------
 
@@ -173,8 +177,8 @@ class NiftyTerminal(App):
     def _render_overnight_journal(self) -> None:
         holder = self._holder("overnight")
         oj = shared_overnight_journal()
-        
-        # Determine filter params
+        cj = shared_confluence_journal()
+
         decision_filter = "all"
         trade_type = "all"
         dir_filter = "all"
@@ -199,7 +203,7 @@ class NiftyTerminal(App):
             limit=100,
         )
         perf = compute_overnight_performance(journal=oj)
-        
+
         title = (
             f"[bold]OVERNIGHT TRADE JOURNAL[/bold] — filter={self.oj_filter}"
             f"{' search=' + repr(self.oj_search) if self.oj_search else ''} · {len(records)} runs"
@@ -208,6 +212,25 @@ class NiftyTerminal(App):
             views.overnight_performance_panel(perf),
             views.overnight_journal_table(records, title=title),
         ]
+
+        setup_map = {"setup-a": "A", "setup-b": "B", "setup-c": "C"}
+        cf_setup = setup_map.get(self.cf_filter, "all")
+        cf_decision = "GO" if self.cf_filter == "go" else "NO-GO" if self.cf_filter == "no-go" else "all"
+        cf_records = cj.list(
+            decision=cf_decision,
+            setup_id=cf_setup,
+            search=self.cf_search,
+            limit=100,
+        )
+        cf_perf = compute_confluence_performance(journal=cj)
+        cf_title = (
+            f"[bold]INTRADAY CONFLUENCE JOURNAL[/bold] — filter={self.cf_filter}"
+            f"{' search=' + repr(self.cf_search) if self.cf_search else ''} · {len(cf_records)} runs"
+        )
+        parts.extend([
+            views.confluence_performance_panel(cf_perf),
+            views.confluence_journal_table(cf_records, title=cf_title),
+        ])
         self._set(holder, *parts)
 
     def _render_market(self) -> None:
@@ -358,10 +381,14 @@ class NiftyTerminal(App):
 
     def _run_overnight_journal_command(self, raw: str) -> str | None:
         oj = shared_overnight_journal()
+        cj = shared_confluence_journal()
         parts = shlex.split(raw)
         cmd, args = parts[0].lower(), parts[1:]
         if cmd == "oj" and args:
             cmd, args = args[0].lower(), args[1:]
+
+        if cmd == "cf" and args:
+            return self._run_confluence_command(args, cj)
 
         try:
             match cmd:
@@ -383,12 +410,16 @@ class NiftyTerminal(App):
                         return f"settled #{rec_id} ({rec.contract_name}) @ ₹{exit_p:.2f} → P&L {rec.pnl_display} ({rec.outcome})"
                     return f"record #{rec_id} not found"
                 case "run":
+                    from model.confluence.engine import build_confluence_report
                     from model.overnight_card import build_overnight_setup
                     candles = self.state.history.candles if self.state.history else []
                     if not candles:
                         return "no market history loaded"
                     setup = build_overnight_setup(candles, self.state.chain)
-                    return f"evaluated overnight setup → {setup.verdict} ({setup.composite.direction.value.upper()}, score {setup.composite.score:.0f})"
+                    cf = build_confluence_report(chain=self.state.chain)
+                    cf_verdicts = " · ".join(f"{s.setup_id}={s.decision}" for s in cf.setups)
+                    return (f"overnight → {setup.verdict} ({setup.composite.direction.value.upper()}, "
+                            f"score {setup.composite.score:.0f}) | confluence: {cf_verdicts or cf.error or 'n/a'}")
                 case "show":
                     if not args:
                         return "usage: show <id>"
@@ -402,6 +433,44 @@ class NiftyTerminal(App):
                     return f"unknown overnight command {cmd!r} — try help"
         except (IndexError, ValueError) as exc:
             return f"bad overnight command: {exc}"
+
+    def _run_confluence_command(self, args: list[str], cj) -> str | None:
+        if not args:
+            return "usage: cf filter|settle|show|search ..."
+        sub, rest = args[0].lower(), args[1:]
+        try:
+            match sub:
+                case "filter":
+                    valid = ("all", "go", "no-go", "setup-a", "setup-b", "setup-c")
+                    if rest and rest[0] in valid:
+                        self.cf_filter = rest[0]
+                        return f"filtered confluence journal → {rest[0]}"
+                    return "cf filter must be all|go|no-go|setup-a|setup-b|setup-c"
+                case "search":
+                    self.cf_search = " ".join(rest) or None
+                    return f"search confluence → {self.cf_search}" if self.cf_search else "cleared confluence search"
+                case "settle":
+                    if len(rest) < 2:
+                        return "usage: cf settle <id> <exit_price>"
+                    rec_id = int(rest[0])
+                    exit_p = float(rest[1])
+                    rec = cj.settle(rec_id, exit_p)
+                    if rec:
+                        return (f"settled confluence #{rec_id} Setup {rec.setup_id} "
+                                f"({rec.contract_name}) @ ₹{exit_p:.2f} → P&L {rec.pnl_display}")
+                    return f"confluence record #{rec_id} not found"
+                case "show":
+                    if not rest:
+                        return "usage: cf show <id>"
+                    rec = cj.get(int(rest[0]))
+                    if not rec:
+                        return f"confluence record #{rest[0]} not found"
+                    return (f"#{rec.id} Setup {rec.setup_id} | {rec.trade_date} | {rec.decision} "
+                            f"{rec.contract_name} | P&L: {rec.pnl_display} | {rec.blocked_reasons or rec.decision_rationale}")
+                case _:
+                    return f"unknown cf command {sub!r}"
+        except (IndexError, ValueError) as exc:
+            return f"bad cf command: {exc}"
 
     def _current_states(self) -> dict[str, str]:
         out = {}
