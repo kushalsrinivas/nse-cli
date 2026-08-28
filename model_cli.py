@@ -174,7 +174,9 @@ def cmd_overnight(args) -> int:
 
     signals = collect_overnight_signals(result.candles)
     setup = build_overnight_setup(result.candles, chain, signals=signals,
-                                  events=args.event or None)
+                                  events=args.event or None,
+                                  run_phase=args.run_phase,
+                                  settle_exit_price=args.settle_exit)
     if args.event:
         console.print("[bold red]⚠ EVENT NIGHT:[/] " +
                       "; ".join(args.event) + " — gap distribution is "
@@ -340,6 +342,10 @@ def main() -> int:
                     help="known scheduled risk tonight, e.g. "
                          "--event 'US-Iran sanctions' (repeatable). "
                          "Each event forces NO-GO.")
+    ov.add_argument("--run-phase", choices=("morning", "evening"), default=None,
+                    help="override morning/evening run phase (auto-detected from clock)")
+    ov.add_argument("--settle-exit", type=float, default=None,
+                    help="exit premium for auto-settling open overnight position")
 
     rs = sub.add_parser("research", help="historical next-open research on this strategy")
     rs.add_argument("--period", default="2y")

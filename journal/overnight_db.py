@@ -73,6 +73,17 @@ CREATE INDEX IF NOT EXISTS idx_oj_outcome ON overnight_trade_journal(outcome);
 CREATE INDEX IF NOT EXISTS idx_oj_direction ON overnight_trade_journal(direction);
 """
 
+_MIGRATION_COLUMNS = (
+    ("run_phase", "TEXT NOT NULL DEFAULT ''"),
+    ("position_date", "TEXT NOT NULL DEFAULT ''"),
+    ("entry_timestamp", "TEXT DEFAULT ''"),
+    ("exit_timestamp", "TEXT DEFAULT ''"),
+    ("is_settled", "INTEGER NOT NULL DEFAULT 0"),
+    ("position_opened", "INTEGER NOT NULL DEFAULT 0"),
+    ("opened_by_run", "TEXT NOT NULL DEFAULT ''"),
+    ("settled_by_run", "TEXT NOT NULL DEFAULT ''"),
+)
+
 
 @dataclass
 class OvernightRunRecord:
@@ -123,6 +134,14 @@ class OvernightRunRecord:
     engine_version: str = "v2.2-ev-dist"
     notes: str = ""
     created_at: str = ""
+    run_phase: str = ""
+    position_date: str = ""
+    entry_timestamp: str = ""
+    exit_timestamp: str = ""
+    is_settled: int = 0
+    position_opened: int = 0
+    opened_by_run: str = ""
+    settled_by_run: str = ""
 
     @property
     def effective_pnl(self) -> float | None:
@@ -152,6 +171,27 @@ class OvernightJournal:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        existing = {row[1] for row in self.conn.execute("PRAGMA table_info(overnight_trade_journal)")}
+        for col, typedef in _MIGRATION_COLUMNS:
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE overnight_trade_journal ADD COLUMN {col} {typedef}")
+        # Backfill position_date for rows created before position tracking existed.
+        self.conn.execute(
+            "UPDATE overnight_trade_journal SET position_date = trade_date "
+            "WHERE (position_date IS NULL OR position_date = '') AND trade_date != ''"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_oj_position_date "
+            "ON overnight_trade_journal(position_date)"
+        )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_oj_one_position_per_day "
+            "ON overnight_trade_journal(position_date) WHERE position_opened = 1"
+        )
+        self.conn.commit()
 
     # -- helpers -------------------------------------------------------------
 
@@ -173,13 +213,31 @@ class OvernightJournal:
             rec.created_at = datetime.now().isoformat(timespec="seconds")
         if not rec.trade_date:
             rec.trade_date = rec.timestamp[:10] if rec.timestamp else datetime.now().strftime("%Y-%m-%d")
+        if not rec.position_date:
+            rec.position_date = rec.trade_date
+
+        if rec.position_opened:
+            if self.has_position_for_date(rec.position_date):
+                raise ValueError(
+                    f"overnight position already opened for {rec.position_date} "
+                    "(one position per trading day)"
+                )
 
         cols = self._cols()
         values = [getattr(rec, c) for c in cols]
         placeholders = ", ".join("?" * len(cols))
-        cur = self.conn.execute(
-            f"INSERT INTO overnight_trade_journal ({', '.join(cols)}) VALUES ({placeholders})", values
-        )
+        try:
+            cur = self.conn.execute(
+                f"INSERT INTO overnight_trade_journal ({', '.join(cols)}) VALUES ({placeholders})",
+                values,
+            )
+        except sqlite3.IntegrityError as exc:
+            if "idx_oj_one_position_per_day" in str(exc):
+                raise ValueError(
+                    f"overnight position already opened for {rec.position_date} "
+                    "(one position per trading day)"
+                ) from exc
+            raise
         self.conn.commit()
         return replace(rec, id=cur.lastrowid)
 
@@ -260,7 +318,76 @@ class OvernightJournal:
         params.append(limit)
         return [self._to_record(r) for r in self.conn.execute(sql, params)]
 
+    def has_position_for_date(self, position_date: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM overnight_trade_journal "
+            "WHERE position_date=? AND position_opened=1 LIMIT 1",
+            (position_date,),
+        ).fetchone()
+        return row is not None
+
+    def list_open_positions(self) -> list[OvernightRunRecord]:
+        rows = self.conn.execute(
+            "SELECT * FROM overnight_trade_journal "
+            "WHERE position_opened=1 AND is_settled=0 "
+            "ORDER BY position_date ASC"
+        ).fetchall()
+        return [self._to_record(r) for r in rows]
+
+    def get_open_position_for_date(self, position_date: str) -> OvernightRunRecord | None:
+        row = self.conn.execute(
+            "SELECT * FROM overnight_trade_journal "
+            "WHERE position_date=? AND position_opened=1 LIMIT 1",
+            (position_date,),
+        ).fetchone()
+        return self._to_record(row) if row else None
+
     # -- Settlement ------------------------------------------------------------
+
+    def settle_position(
+        self,
+        record_id: int,
+        exit_price: float,
+        *,
+        settled_by_run: str = "",
+        exit_timestamp: str | None = None,
+        is_actual: bool | None = None,
+        notes: str | None = None,
+    ) -> OvernightRunRecord | None:
+        """Settle an open overnight position with full lifecycle metadata."""
+        rec = self.get(record_id)
+        if not rec or rec.entry_price is None or rec.entry_price <= 0:
+            return None
+        if rec.is_settled:
+            return rec
+
+        actual_flag = rec.is_actual_trade if is_actual is None else (1 if is_actual else 0)
+        entry = rec.entry_price
+        lot_qty = (rec.contracts or 1) * 75
+        price_diff = exit_price - entry
+        pnl = price_diff * lot_qty
+        pnl_pct = (price_diff / entry) * 100.0 if entry > 0 else 0.0
+        outcome = "WIN" if pnl > 100 else "LOSS" if pnl < -100 else "BREAKEVEN"
+
+        if actual_flag:
+            rec.actual_exit_price = round(exit_price, 2)
+            rec.actual_pnl = round(pnl, 2)
+            rec.actual_pnl_pct = round(pnl_pct, 2)
+            rec.is_actual_trade = 1
+        else:
+            rec.hypothetical_exit_price = round(exit_price, 2)
+            rec.hypothetical_pnl = round(pnl, 2)
+            rec.hypothetical_pnl_pct = round(pnl_pct, 2)
+
+        rec.outcome = outcome
+        rec.is_settled = 1
+        rec.settled_by_run = settled_by_run
+        rec.exit_timestamp = exit_timestamp or datetime.now().isoformat(timespec="seconds")
+        if notes:
+            rec.notes = f"{rec.notes}; {notes}".strip("; ")
+
+        self.update(rec)
+        return rec
 
     def settle(
         self,
@@ -273,6 +400,15 @@ class OvernightJournal:
         rec = self.get(record_id)
         if not rec or rec.entry_price is None or rec.entry_price <= 0:
             return None
+
+        if rec.position_opened and not rec.is_settled:
+            return self.settle_position(
+                record_id,
+                exit_price,
+                settled_by_run="manual",
+                is_actual=is_actual,
+                notes=notes,
+            )
 
         actual_flag = rec.is_actual_trade if is_actual is None else (1 if is_actual else 0)
         entry = rec.entry_price

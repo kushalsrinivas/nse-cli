@@ -293,16 +293,17 @@ def overnight_journal_table(records: list, title: str) -> Panel:
     table = Table(box=box.SIMPLE, expand=True, header_style="bold cyan")
     table.add_column("ID", width=4)
     table.add_column("Date", style="grey50", width=10)
-    table.add_column("NIFTY", justify="right", width=10)
-    table.add_column("Dir", justify="center", width=5)
-    table.add_column("Decision", justify="center", width=8)
-    table.add_column("Conf", justify="right", width=5)
-    table.add_column("Contract", width=16)
-    table.add_column("Entry", justify="right", width=8)
-    table.add_column("Exit", justify="right", width=8)
-    table.add_column("P&L", justify="right", width=11)
-    table.add_column("Outcome", justify="center", width=9)
-    table.add_column("Rationale / Blocked Gates")
+    table.add_column("Run", width=6)
+    table.add_column("Pos", width=4)
+    table.add_column("NIFTY", justify="right", width=9)
+    table.add_column("Dir", justify="center", width=4)
+    table.add_column("Dec", justify="center", width=6)
+    table.add_column("Contract", width=14)
+    table.add_column("Entry", justify="right", width=7)
+    table.add_column("Exit", justify="right", width=7)
+    table.add_column("P&L", justify="right", width=10)
+    table.add_column("Settled", width=7)
+    table.add_column("Notes / Gates")
 
     for r in records:
         dec_style = "bold green" if r.decision == "GO" else "bold red"
@@ -321,23 +322,31 @@ def overnight_journal_table(records: list, title: str) -> Panel:
         exit_str = f"₹{exit_val:,.1f}" if exit_val is not None else "—"
         entry_str = f"₹{r.entry_price:,.1f}" if r.entry_price is not None else "—"
 
-        out_style = "green" if r.outcome == "WIN" else "red" if r.outcome == "LOSS" else "yellow" if r.outcome == "BREAKEVEN" else "grey50"
-        
-        gate_info = r.blocked_reasons if r.decision == "NO-GO" and r.blocked_reasons else (r.decision_rationale or r.notes or "")
-        gate_text = gate_info[:55] + ("…" if len(gate_info) > 55 else "")
+        settled_str = "yes" if getattr(r, "is_settled", 0) else "open" if getattr(r, "position_opened", 0) else "—"
+        settled_style = "green" if settled_str == "yes" else "yellow" if settled_str == "open" else "grey50"
+        run_label = getattr(r, "run_phase", "") or "—"
+        pos_label = "●" if getattr(r, "position_opened", 0) else "—"
+
+        gate_info = r.blocked_reasons if r.decision == "NO-GO" and r.blocked_reasons else (r.notes or r.decision_rationale or "")
+        opened = getattr(r, "opened_by_run", "")
+        closed = getattr(r, "settled_by_run", "")
+        if opened or closed:
+            gate_info = f"open={opened or '—'} settle={closed or '—'} · {gate_info}".strip(" · ")
+        gate_text = gate_info[:50] + ("…" if len(gate_info) > 50 else "")
 
         table.add_row(
             str(r.id),
             r.trade_date,
+            run_label,
+            pos_label,
             f"{r.nifty_close:,.1f}",
             Text(dir_label, style=dir_style),
             Text(r.decision, style=dec_style),
-            f"{r.confidence_score:.0f}",
             r.contract_name.replace("NIFTY ", "") if r.contract_name else "—",
             entry_str,
             exit_str,
             pnl_text,
-            Text(r.outcome, style=out_style),
+            Text(settled_str, style=settled_style),
             gate_text,
         )
 

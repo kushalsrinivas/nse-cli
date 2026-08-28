@@ -153,7 +153,10 @@ def match_conditions(conds: Conditions, signals: list,
 def build_overnight_setup(candles, chain: OptionChain | None,
                           signals=None, journal=None,
                           settings=SETTINGS,
-                          events: list[str] | None = None) -> OvernightSetup:
+                          events: list[str] | None = None,
+                          run_phase: str | None = None,
+                          settle_exit_price: float | None = None,
+                          now: datetime | None = None) -> OvernightSetup:
     """Evaluate tonight's setup through the distributional EV engine."""
     from analysis.signals import Direction as Dir
     from model.backtest import _base_frame
@@ -337,7 +340,27 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     # Deduplicate reasons list cleanly
     setup.reasons = list(dict.fromkeys(reasons))
     setup.go = (len(setup.reasons) == 0)
-    _record(setup, journal, events=events)
+
+    from journal.overnight_position import apply_position_rules
+
+    settled_positions, effective_phase = apply_position_rules(
+        setup,
+        journal=journal,
+        run_phase=run_phase,
+        now=now,
+        chain=chain,
+        settle_exit_price=settle_exit_price,
+    )
+    setup.reasons = list(dict.fromkeys(setup.reasons))
+
+    _record(
+        setup,
+        journal,
+        events=events,
+        run_phase=effective_phase,
+        now=now,
+        settled_positions=settled_positions,
+    )
     return setup
 
 
@@ -364,11 +387,14 @@ def _nearest_dte(chain: OptionChain | None) -> int:
         return 7
 
 
-def _record(setup: OvernightSetup, journal, events=None) -> None:
+def _record(setup: OvernightSetup, journal, events=None,
+            run_phase: str = "", now: datetime | None = None,
+            settled_positions: list | None = None) -> None:
     # 1. Dedicated Overnight Trade Journal (Records EVERY run: GO, NO-GO, Error)
     try:
         from journal.overnight_db import OvernightRunRecord, shared_overnight_journal
-        oj = shared_overnight_journal()
+        from journal.overnight_position import attach_position_metadata, detect_run_phase
+        oj = journal or shared_overnight_journal()
         ch = setup.chosen_strategy.candidate if setup.chosen_strategy else None
         ev = setup.chosen_strategy
         
@@ -376,7 +402,18 @@ def _record(setup: OvernightSetup, journal, events=None) -> None:
         rsi_a = next((a for a in setup.assessments if "rsi" in a.name.lower()), None)
         macd_a = next((a for a in setup.assessments if "macd" in a.name.lower()), None)
         
-        now_dt = datetime.now()
+        now_dt = now or datetime.now()
+        phase = run_phase or detect_run_phase(now_dt)
+        position_opened = setup.go and phase == "evening"
+
+        settle_note = ""
+        if settled_positions:
+            parts = [
+                f"#{p.id} {p.contract_name} → {p.pnl_display} ({p.outcome})"
+                for p in settled_positions
+            ]
+            settle_note = f"settled via {phase}: " + "; ".join(parts)
+
         run_rec = OvernightRunRecord(
             id=None,
             run_id="",
@@ -399,8 +436,8 @@ def _record(setup: OvernightSetup, journal, events=None) -> None:
             hypothetical_exit_price=None,
             hypothetical_pnl=None,
             hypothetical_pnl_pct=None,
-            outcome="PENDING",
-            is_actual_trade=1 if setup.go else 0,
+            outcome="PENDING" if position_opened else "NOT_TRADED",
+            is_actual_trade=1 if position_opened else 0,
             rel_volume=setup.conditions.vol_spike and 1.3 or (setup.conditions.thin_volume and 0.5 or 1.0) if setup.conditions.vol_available else None,
             close_pos=setup.close_pos,
             close_location=setup.conditions.close_location.value,
@@ -417,16 +454,28 @@ def _record(setup: OvernightSetup, journal, events=None) -> None:
             p_direction=ev.p_direction if ev else None,
             p_profitable=ev.p_profitable if ev else None,
             p10_loss_lot=ev.p10_pnl_lot if ev else None,
-            contracts=setup.sizing.contracts if setup.sizing and setup.go else (1 if ch else None),
-            max_risk=setup.sizing.max_risk_rupees if setup.sizing and setup.go else (ch.net_premium * 75 if ch else None),
+            contracts=setup.sizing.contracts if setup.sizing and position_opened else (1 if ch and position_opened else None),
+            max_risk=setup.sizing.max_risk_rupees if setup.sizing and position_opened else (ch.net_premium * 75 if ch and position_opened else None),
             signal_scores=json.dumps({a.name: a.confidence for a in setup.assessments}),
             decision_rationale=f"Score {setup.composite.score:.0f}/100 in {setup.regime.label}, matched '{setup.matched_bucket}' (n={setup.hist_n}, win={setup.hist_win_rate_open*100:.1f}%)",
             blocked_reasons="; ".join(setup.reasons),
             engine_version="v2.2-ev-dist",
-            notes="; ".join(events) if events else "",
+            notes="; ".join(filter(None, [
+                "; ".join(events) if events else "",
+                settle_note,
+            ])),
             created_at=now_dt.isoformat(timespec="seconds"),
         )
+        attach_position_metadata(
+            run_rec,
+            run_phase=phase,
+            now=now_dt,
+            position_opened=position_opened,
+        )
         oj.add(run_rec)
+    except ValueError as exc:
+        setup.reasons.append(str(exc))
+        setup.go = False
     except Exception:
         pass
 
