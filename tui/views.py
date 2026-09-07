@@ -252,7 +252,14 @@ def trades_table(trades: list[Trade], title: str) -> Panel:
 
     for t in trades:
         pnl_col = "bright_green" if (t.pnl or 0) >= 0 else "bright_red"
-        dir_mark = "L" if t.direction == "long" else "S"
+        if t.option_type:
+            # Option buys are always long in the DB (buying = long); the
+            # decision-relevant info is CE vs PE, so show that instead of "L".
+            dir_mark = t.option_type.upper()
+            dir_style = "bold magenta" if dir_mark == "CE" else "bold red"
+        else:
+            dir_mark = "L" if t.direction == "long" else "S"
+            dir_style = "green" if dir_mark == "L" else "red"
         contract = Text(t.contract_name)
         if t.option_type:
             contract.stylize("bold magenta" if t.option_type == "CE" else "bold red")
@@ -263,7 +270,7 @@ def trades_table(trades: list[Trade], title: str) -> Panel:
             str(t.id),
             t.timestamp[:16].replace("T", " "),
             contract,
-            Text(dir_mark, style="green" if dir_mark == "L" else "red"),
+            Text(dir_mark, style=dir_style),
             f"{t.entry_price:,.2f}",
             f"{t.exit_price:,.2f}" if t.exit_price else "—",
             lots,

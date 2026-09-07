@@ -6,6 +6,7 @@ __pycache__/
 # Runtime artifacts
 cache/
 journal.db
+*.bak
 model/learned_weights.json
 
 # OS

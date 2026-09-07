@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 import numpy as np
+import pandas as pd
 
 from analysis.signals import Direction
 from config import SETTINGS
@@ -81,10 +82,18 @@ class OvernightSetup:
     sizing: SizingResult | None = None
     go: bool = False
     reasons: list[str] = field(default_factory=list)
+    # Constituent breadth layer (opt-in; None = NIFTY-only baseline).
+    breadth: object | None = None
+    breadth_points: float = 0.0
+    divergence_flags: list = field(default_factory=list)
+    scenarios: object | None = None
+    overnight_setups: object | None = None
 
     # Legacy compatibility fields
     chosen: object = None
     candidates: list[object] = field(default_factory=list)
+    # Contract size this setup was evaluated with (== settings.lot_size).
+    lot_size: int = 75
 
     @property
     def verdict(self) -> str:
@@ -153,8 +162,25 @@ def match_conditions(conds: Conditions, signals: list,
 def build_overnight_setup(candles, chain: OptionChain | None,
                           signals=None, journal=None,
                           settings=SETTINGS,
-                          events: list[str] | None = None) -> OvernightSetup:
-    """Evaluate tonight's setup through the distributional EV engine."""
+                          events: list[str] | None = None,
+                          breadth=None, record: bool = True,
+                          expiry_dates: list[str] | None = None,
+                          underlying: str = "NIFTY") -> OvernightSetup:
+    """Evaluate tonight's setup through the distributional EV engine.
+
+    `breadth` is an optional `BreadthSnapshot` for tonight (see
+    `model/breadth/live.py:build_live_snapshot`). When provided it adds a
+    bounded score adjustment (via the pipeline), divergence caution gates,
+    and a 5-scenario probability set. When None, behaviour is exactly the
+    NIFTY-only baseline.
+
+    `record=False` is a dry run: nothing is written to any journal (the
+    inner pipeline evaluation is also run with `persist=False`).
+
+    `expiry_dates` (ISO dates, e.g. a stock's monthly expiries) switches
+    Gate 3 and signal discipline from the NIFTY weekday heuristic to exact
+    date matching. Contract sizing throughout uses `settings.lot_size`.
+    """
     from analysis.signals import Direction as Dir
     from model.backtest import _base_frame
     from model.journal import SetupJournal, SetupRecord, now_iso
@@ -174,7 +200,8 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     rng = float(row["high"]) - float(row["low"])
 
     base = run_pipeline(candles=candles, chain=chain, journal=None,
-                        settings=settings)
+                        settings=settings, breadth=breadth,
+                        persist=record)
 
     close_pos = ((float(row["close"]) - float(row["low"])) / rng) if rng > 0 else 0.5
     rel_raw = row.get("rel_volume")
@@ -204,12 +231,37 @@ def build_overnight_setup(candles, chain: OptionChain | None,
         composite=base.composite,
         conditions=conds,
         close_pos=round(close_pos, 3),
+        breadth=breadth,
+        breadth_points=getattr(base, "breadth_points", 0.0),
+        lot_size=settings.lot_size,
     )
+
+    # --- Constituent breadth: divergence + scenarios ------------------------
+    # VIX is fetched once (cached) for scenarios, setups and the EV branch.
+    vix_early = _early_vix()
+    div_flags: list = []
+    scen = None
+    if breadth is not None and getattr(breadth, "sufficient", False):
+        from model.breadth.divergence import detect_divergence, worst_severity
+        from model.breadth.scenarios import build_scenarios
+        n_ctx = _breadth_nifty_context(frame)
+        div_flags = detect_divergence(
+            breadth,
+            nifty_close_pos_60=n_ctx["close_pos_60"],
+            nifty_new_high_20=n_ctx["new_high_20"],
+            nifty_new_low_20=n_ctx["new_low_20"],
+        )
+        scen = build_scenarios(
+            base.composite.direction.value, base.composite.score, breadth,
+            div_flags, vix_level=vix_early,
+            global_pulse=None, event_risk=bool(events))
+        setup.divergence_flags = div_flags
+        setup.scenarios = scen
 
     # --- Historical bucket match & Distributional extraction ---------------
     if signals is None:
         signals = collect_overnight_signals(candles, settings)
-    signals = apply_discipline(signals)
+    signals = apply_discipline(signals, expiry_dates=expiry_dates)
     label, subset = match_conditions(conds, list(signals),
                                      min_bucket_n=settings.min_bucket_n)
     setup.matched_bucket = label
@@ -225,6 +277,19 @@ def build_overnight_setup(candles, chain: OptionChain | None,
         atm_iv = _chain_atm_iv(chain, setup.spot)
         dte = _nearest_dte(chain)
         setup.outlook = premium_outlook([s.gap_pct for s in subset], setup.spot, atm_iv, dte, settings)
+
+    # --- Overnight setups: concrete pre-close checklists --------------------
+    # Pure function of the above — no fetching. Evaluated even without
+    # breadth (missing inputs become N/A, never FAIL), so ON-D and the
+    # technical leg of ON-A/ON-C always speak.
+    from model.overnight_setups.engine import build_overnight_setups_report
+    snap_for_setups = breadth if breadth is not None and getattr(
+        breadth, "sufficient", False) else None
+    os_report = build_overnight_setups_report(
+        score=base.composite.score, direction=base.composite.direction,
+        snap=snap_for_setups, flags=div_flags, scen=scen, vix=vix_early,
+        hist_n=setup.hist_n, events=events or [])
+    setup.overnight_setups = os_report
 
     # --- HARD GATES & DISTANCE-TO-GO ---------------------------------------
     reasons = []
@@ -243,18 +308,56 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     elif base.composite.direction is Dir.NEUTRAL:
         reasons.append("no directional edge (neutral setup)")
 
+    # Hard Gate 2b: Constituent divergence caution (evidence, not trigger).
+    # Severe opposing divergence blocks outright; moderate divergence blocks
+    # only marginal setups (score < 72) so strong technicals can overrule.
+    if div_flags:
+        from model.breadth.divergence import worst_severity
+        sev = worst_severity(div_flags)
+        opposing = [f for f in div_flags if f.severity >= 2 and (
+            (base.composite.direction is Dir.BULLISH and f.direction == "bearish")
+            or (base.composite.direction is Dir.BEARISH and f.direction == "bullish"))]
+        if opposing and (sev >= 3 or base.composite.score < 72):
+            names = ", ".join(f.flag for f in opposing)
+            reasons.append(
+                f"constituent divergence ({names}, severity {sev}/3): breadth "
+                f"opposes the {base.composite.direction.value} close — "
+                "needs stronger confirmation")
+
+    # Hard Gate 2c: Overnight setup filters (ON-B narrow tape, ON-D event/vol).
+    # Filters can only veto, never create, a trade — same contract as the
+    # breadth adjustment. Candidates (ON-A/ON-C) annotate, they don't gate.
+    for blocker in os_report.blockers:
+        reasons.append(
+            f"overnight setup {blocker.setup_id} ({blocker.name}): "
+            f"{blocker.rationale}")
+
     # Hard Gate 3: Calendar & Expiry discipline
     entry_ts = frame.index[-1]
     holding_days = 2.75 if entry_ts.weekday() == 4 else 0.75
 
     if entry_ts.weekday() == 4:
         reasons.append("Friday entry holds over weekend (66h decay) -> blocked")
-    if (entry_ts.weekday() + 1) % 5 == _expiry_weekday(entry_ts):
-        kind = classify_next_expiry(entry_ts)
-        stakes = "max open interest + max gamma" if kind == "monthly" else "elevated gamma overnight"
-        reasons.append(f"next session is {kind} expiry ({stakes}) -> blocked")
-    if entry_ts.weekday() == _expiry_weekday(entry_ts):
-        reasons.append("expiry day -> no new entries")
+    if expiry_dates is not None:
+        # Exact matching (stock monthly expiries): no weekday heuristic.
+        exp_set = set(expiry_dates)
+        entry_day = entry_ts.date().isoformat()
+        nxt = entry_ts + pd.Timedelta(days=1)
+        if nxt.weekday() == 5:
+            nxt += pd.Timedelta(days=2)
+        elif nxt.weekday() == 6:
+            nxt += pd.Timedelta(days=1)
+        if nxt.date().isoformat() in exp_set:
+            reasons.append("next session is stock expiry (max gamma overnight) -> blocked")
+        if entry_day in exp_set:
+            reasons.append("expiry day -> no new entries")
+    else:
+        if (entry_ts.weekday() + 1) % 5 == _expiry_weekday(entry_ts):
+            kind = classify_next_expiry(entry_ts)
+            stakes = "max open interest + max gamma" if kind == "monthly" else "elevated gamma overnight"
+            reasons.append(f"next session is {kind} expiry ({stakes}) -> blocked")
+        if entry_ts.weekday() == _expiry_weekday(entry_ts):
+            reasons.append("expiry day -> no new entries")
 
     # Hard Gate 4: Scheduled event risks
     for ev in (events or []):
@@ -273,6 +376,7 @@ def build_overnight_setup(candles, chain: OptionChain | None,
             spot=setup.spot,
             direction=base.composite.direction,
             lot_size=settings.lot_size,
+            underlying=underlying,
         )
         if not cands:
             reasons.append("no liquid candidate contracts found (ITM/ATM/Spread)")
@@ -337,13 +441,45 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     # Deduplicate reasons list cleanly
     setup.reasons = list(dict.fromkeys(reasons))
     setup.go = (len(setup.reasons) == 0)
-    _record(setup, journal, events=events)
+    if record:
+        _record(setup, journal, events=events)
     return setup
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _breadth_nifty_context(frame) -> dict:
+    """20d-high/low flags + 60d close position for divergence detection."""
+    ctx = {"close_pos_60": None, "new_high_20": False, "new_low_20": False}
+    try:
+        closes = frame["close"]
+        if len(closes) >= 20:
+            hi20, lo20 = float(closes.iloc[-20:].max()), float(closes.iloc[-20:].min())
+            last = float(closes.iloc[-1])
+            ctx["new_high_20"] = bool(last >= hi20)
+            ctx["new_low_20"] = bool(last <= lo20)
+        if len(closes) >= 60:
+            hi60, lo60 = float(closes.iloc[-60:].max()), float(closes.iloc[-60:].min())
+            last = float(closes.iloc[-1])
+            if hi60 > lo60:
+                ctx["close_pos_60"] = round((last - lo60) / (hi60 - lo60), 3)
+    except (KeyError, IndexError, ValueError):
+        pass
+    return ctx
+
+
+def _early_vix() -> float | None:
+    """Best-effort India VIX for the scenario engine (None if unavailable)."""
+    try:
+        from model.macro import fetch_macro_history
+        macro_data = fetch_macro_history("5d")
+        if "indiavix" in macro_data and not macro_data["indiavix"].empty:
+            return float(macro_data["indiavix"].iloc[-1])
+    except Exception:
+        pass
+    return None
 
 def _chain_atm_iv(chain: OptionChain | None, spot: float) -> float:
     if not chain or not chain.rows:
@@ -377,6 +513,35 @@ def _record(setup: OvernightSetup, journal, events=None) -> None:
         macd_a = next((a for a in setup.assessments if "macd" in a.name.lower()), None)
         
         now_dt = datetime.now()
+        rationale = (f"Score {setup.composite.score:.0f}/100 in {setup.regime.label}, "
+                     f"matched '{setup.matched_bucket}' (n={setup.hist_n}, "
+                     f"win={setup.hist_win_rate_open * 100:.1f}%)")
+        sig_scores = {a.name: a.confidence for a in setup.assessments}
+        if setup.breadth is not None:
+            try:
+                b = setup.breadth
+                rationale += (f" | breadth {b.breadth_score:+.0f} "
+                              f"({b.participation}, adv {b.adv_pct}%, "
+                              f"confirm {b.confirming_pct}%) "
+                              f"{setup.breadth_points:+.1f}pts")
+                if setup.divergence_flags:
+                    rationale += (" | div: " + ", ".join(
+                        f.flag for f in setup.divergence_flags))
+                if setup.scenarios is not None:
+                    rationale += (f" | P(cont)={setup.scenarios.continuation_prob:.0%}")
+                sig_scores["breadth_score"] = b.breadth_score
+                sig_scores["breadth_points"] = setup.breadth_points
+            except (AttributeError, TypeError):
+                pass
+        if setup.overnight_setups is not None:
+            try:
+                bits = " · ".join(
+                    f"{r.setup_id} {r.short_label}"
+                    for r in setup.overnight_setups.results)
+                rationale += f" | setups: {bits}"
+                sig_scores["setups"] = bits
+            except (AttributeError, TypeError):
+                pass
         run_rec = OvernightRunRecord(
             id=None,
             run_id="",
@@ -418,9 +583,9 @@ def _record(setup: OvernightSetup, journal, events=None) -> None:
             p_profitable=ev.p_profitable if ev else None,
             p10_loss_lot=ev.p10_pnl_lot if ev else None,
             contracts=setup.sizing.contracts if setup.sizing and setup.go else (1 if ch else None),
-            max_risk=setup.sizing.max_risk_rupees if setup.sizing and setup.go else (ch.net_premium * 75 if ch else None),
-            signal_scores=json.dumps({a.name: a.confidence for a in setup.assessments}),
-            decision_rationale=f"Score {setup.composite.score:.0f}/100 in {setup.regime.label}, matched '{setup.matched_bucket}' (n={setup.hist_n}, win={setup.hist_win_rate_open*100:.1f}%)",
+            max_risk=setup.sizing.max_risk_rupees if setup.sizing and setup.go else (ch.net_premium * setup.lot_size if ch else None),
+            signal_scores=json.dumps(sig_scores),
+            decision_rationale=rationale,
             blocked_reasons="; ".join(setup.reasons),
             engine_version="v2.2-ev-dist",
             notes="; ".join(events) if events else "",

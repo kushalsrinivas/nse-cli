@@ -162,19 +162,33 @@ def classify_next_expiry(next_ts) -> str:
 
 
 def apply_discipline(signals: list[OvernightSignal], *,
-                     skip_weekends: bool = True,
-                     skip_hold_into_expiry: bool = True,
-                     skip_entry_on_expiry: bool = True) -> list[OvernightSignal]:
-    """Trading-discipline filter."""
+                      skip_weekends: bool = True,
+                      skip_hold_into_expiry: bool = True,
+                      skip_entry_on_expiry: bool = True,
+                      expiry_dates: list[str] | None = None) -> list[OvernightSignal]:
+    """Trading-discipline filter.
+
+    `expiry_dates` (ISO 'YYYY-MM-DD', e.g. a stock's monthly expiries from
+    the chain) switches the expiry checks from the NIFTY weekday heuristic
+    to exact date matching. When None, legacy index behavior is unchanged.
+    """
+    exact = set(expiry_dates) if expiry_dates else None
     out = []
     for s in signals:
         if skip_weekends and s.calendar_gap_days > 1:
             continue
-        if skip_hold_into_expiry and s.next_timestamp is not None \
-                and s.next_timestamp.weekday() == _expiry_weekday(s.next_timestamp):
-            continue
-        if skip_entry_on_expiry and s.timestamp.weekday() == _expiry_weekday(s.timestamp):
-            continue
+        if skip_hold_into_expiry and s.next_timestamp is not None:
+            if exact is not None:
+                if s.next_timestamp.date().isoformat() in exact:
+                    continue
+            elif s.next_timestamp.weekday() == _expiry_weekday(s.next_timestamp):
+                continue
+        if skip_entry_on_expiry:
+            if exact is not None:
+                if s.timestamp.date().isoformat() in exact:
+                    continue
+            elif s.timestamp.weekday() == _expiry_weekday(s.timestamp):
+                continue
         out.append(s)
     return out
 

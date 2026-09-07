@@ -11,7 +11,7 @@ allowed; blocked setups carry the reason so nothing is silently dropped.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from analysis.indicators import compute as compute_indicators
 from analysis.signals import Direction
@@ -42,6 +42,10 @@ class TradeSetup:
     grade: str = "F"
     allowed: bool = False
     block_reason: str = ""
+    # Constituent breadth layer (opt-in; None = NIFTY-only baseline).
+    breadth: object | None = None
+    breadth_points: float = 0.0
+    breadth_notes: list[str] = field(default_factory=list)
 
     @property
     def direction(self) -> Direction:
@@ -49,8 +53,16 @@ class TradeSetup:
 
 
 def evaluate(candles=None, chain=None, journal: SetupJournal | None = None,
-             settings=SETTINGS) -> TradeSetup:
-    """Run the full pipeline on live/cached market data."""
+             settings=SETTINGS, breadth=None, use_breadth: bool = True,
+             persist: bool = True) -> TradeSetup:
+    """Run the full pipeline on live/cached market data.
+
+    `breadth` is an optional `BreadthSnapshot` for tonight. When provided
+    (and `use_breadth`), a bounded adjustment (±8pts, never lifting a
+    sub-threshold score across the gate) is applied to the composite — see
+    `model/breadth/integration.py`. Default None preserves the exact
+    NIFTY-only baseline for reproducibility.
+    """
     if candles is None:
         candles = nifty.fetch_history().candles
     if len(candles) < 60:
@@ -67,6 +79,31 @@ def evaluate(candles=None, chain=None, journal: SetupJournal | None = None,
     weights = compute_effective_weights(regime.regime, available, learned)
     composite = compute_composite(assessments, weights, regime)
 
+    breadth_points = 0.0
+    breadth_notes: list[str] = []
+    if breadth is not None and use_breadth:
+        from model.breadth.divergence import detect_divergence
+        from model.breadth.integration import compute_adjustment
+        flags = detect_divergence(breadth)
+        adj = compute_adjustment(composite.score, composite.direction,
+                                 breadth, flags, regime.regime)
+        breadth_points = adj.points
+        breadth_notes = list(adj.rationale)
+        if adj.points:
+            from model.composite import (
+                _risk_tier,
+                classify,
+                estimate_win_probability,
+            )
+            new_score = adj.adjusted_score
+            composite = replace(
+                composite,
+                score=new_score,
+                classification=classify(new_score),
+                win_probability=estimate_win_probability(new_score, regime),
+                risk_multiplier=_risk_tier(new_score, None),
+            )
+
     setup = TradeSetup(
         created_at=now_iso(),
         spot=float(frame["close"].iloc[-1]),
@@ -74,6 +111,9 @@ def evaluate(candles=None, chain=None, journal: SetupJournal | None = None,
         assessments=assessments,
         weights=weights,
         composite=composite,
+        breadth=breadth if use_breadth else None,
+        breadth_points=breadth_points,
+        breadth_notes=breadth_notes,
     )
 
     # --- Options layer ----------------------------------------------------
@@ -119,7 +159,7 @@ def evaluate(candles=None, chain=None, journal: SetupJournal | None = None,
     else:
         setup.block_reason = "no suitable option candidate"
 
-    _persist(setup, journal, settings)
+    _persist(setup, journal, settings) if persist else None
     return setup
 
 
@@ -127,6 +167,22 @@ def _persist(setup: TradeSetup, journal: SetupJournal | None,
              settings=SETTINGS) -> int | None:
     try:
         j = journal or SetupJournal()
+        scores = {a.name: a.confidence for a in setup.assessments}
+        notes = ""
+        if setup.breadth is not None:
+            try:
+                snap = setup.breadth
+                scores["breadth_score"] = snap.breadth_score
+                scores["breadth_points"] = setup.breadth_points
+                scores["breadth_adv_pct"] = snap.adv_pct
+                scores["breadth_confirm_pct"] = snap.confirming_pct
+                notes = ("breadth "
+                         f"{snap.breadth_score:+.0f} ({snap.participation}, "
+                         f"adv {snap.adv_pct}%, confirm {snap.confirming_pct}%) "
+                         f"{setup.breadth_points:+.1f}pts; "
+                         + "; ".join(setup.breadth_notes))[:500]
+            except (AttributeError, TypeError):
+                pass
         return j.record(SetupRecord(
             created_at=setup.created_at,
             nifty_price=round(setup.spot, 2),
@@ -144,12 +200,13 @@ def _persist(setup: TradeSetup, journal: SetupJournal | None,
             target=setup.chosen.target_price if setup.chosen else None,
             contracts=setup.sizing.contracts if setup.sizing else None,
             max_risk=setup.sizing.max_risk_rupees if setup.sizing else None,
-            indicator_scores={a.name: a.confidence for a in setup.assessments},
+            indicator_scores=scores,
             group_weights=dict(setup.weights.weights),
             conflict_penalty=setup.composite.conflict_penalty,
             confirmation_bonus=setup.composite.confirmation_bonus,
             regime_penalty=setup.composite.regime_penalty,
             blocked_reason="" if setup.allowed else setup.block_reason,
+            notes=notes,
         )).id
     except Exception as exc:
         log.error("failed to persist setup: %s", exc)

@@ -41,6 +41,12 @@ class TerminalState:
         self.states: list = []
         self.events: list = []
         self.error: str | None = None
+        # Constituent breadth (loaded lazily — 50 tickers, not on the 60s
+        # cadence; see action_refresh_breadth).
+        self.breadth = None            # BreadthDetail | None
+        self.breadth_error: str | None = None
+        self.breadth_loading: bool = False
+        self.breadth_pending: bool = False  # tab visited before history ready
         self.lock = threading.Lock()
 
 
@@ -61,8 +67,10 @@ class NiftyTerminal(App):
         Binding("5", "tab('journal')", "Journal", show=False),
         Binding("6", "tab('performance')", "Performance", show=False),
         Binding("7", "tab('overnight')", "Overnight", show=False),
+        Binding("8", "tab('breadth')", "Breadth", show=False),
         Binding("r", "force_refresh", "Refresh"),
         Binding("e", "next_expiry", "Expiry"),
+        Binding("b", "refresh_breadth", "Breadth"),
         Binding("c", "copy_context", "Copy"),
         Binding("q", "quit", "Quit"),
     ]
@@ -87,7 +95,7 @@ class NiftyTerminal(App):
                 ("market", "1 Market"), ("technicals", "2 Technicals"),
                 ("options", "3 Options"), ("signals", "4 Signals"),
                 ("journal", "5 Journal"), ("performance", "6 Performance"),
-                ("overnight", "7 Overnight"),
+                ("overnight", "7 Overnight"), ("breadth", "8 Breadth"),
             ):
                 with TabPane(title=title, id=tab_id):
                     if tab_id == "journal":
@@ -127,6 +135,10 @@ class NiftyTerminal(App):
                 self.state.states = states
                 self.state.events = events
                 self.state.chain = chain
+            if self.state.breadth_pending and self.state.breadth is None \
+                    and not self.state.breadth_loading:
+                self.state.breadth_pending = False
+                self._load_breadth(use_cache=True)
             self.call_from_thread(self._render_all)
             if force:
                 self.call_from_thread(
@@ -173,6 +185,7 @@ class NiftyTerminal(App):
         self._render_journal()
         self._render_performance()
         self._render_overnight_journal()
+        self._render_breadth()
 
     def _render_overnight_journal(self) -> None:
         holder = self._holder("overnight")
@@ -301,6 +314,73 @@ class NiftyTerminal(App):
         else:
             self._set(holder, views.performance_summary(stats), views.breakdown_tables(breakdowns))
 
+    def _render_breadth(self) -> None:
+        from model.breadth.view import (
+            breadth_panel,
+            divergence_panel,
+            sectors_panel,
+            stocks_panel,
+            tape_summary,
+        )
+        from model.overnight_setups.view import setups_panel
+        holder = self._holder("breadth")
+        st = self.state
+        if st.breadth_loading:
+            self._set(holder, Panel(
+                Text("Fetching 50 constituents… (first visit takes ~30–60s)",
+                     style="yellow"), box=box.ROUNDED))
+            return
+        if st.breadth_error and st.breadth is None:
+            self._set(holder, Panel(
+                Text(f"Breadth unavailable: {st.breadth_error}\n"
+                     f"Press b to retry.", style="yellow"), box=box.ROUNDED))
+            return
+        if st.breadth is None:
+            self._set(holder, Panel(
+                Text("Constituent breadth loads on demand (50 tickers — too "
+                     "heavy for the 60s auto-refresh).\nPress b to load.",
+                     style="yellow"), box=box.ROUNDED))
+            return
+        d = st.breadth
+        age = d.fetched_at.strftime("%H:%M:%S")
+        parts = [
+            Panel(Text(tape_summary(d.snap, d.flags), style="bold"),
+                  title=f"[bold]Tape Read[/bold] — {d.snap.date} · "
+                        f"as of {age} · press b to refresh",
+                  box=box.ROUNDED),
+            breadth_panel(d.snap),
+            stocks_panel(d.feats),
+            sectors_panel(d.snap),
+            divergence_panel(d.flags),
+        ]
+        # Overnight setups read: cheap screen on cached data (no journaling,
+        # no VIX/hist cohort -> those conditions show N/A). Full EV stays in
+        # `tonight`.
+        try:
+            from model.breadth.scenarios import build_scenarios
+            from model.overnight_setups.engine import (
+                build_overnight_setups_report,
+            )
+            from model.pipeline import evaluate
+            screen = evaluate(candles=st.history.candles, chain=st.chain,
+                              persist=False, breadth=d.snap)
+            scen = build_scenarios(screen.composite.direction.value,
+                                   screen.composite.score, d.snap, d.flags)
+            parts.append(setups_panel(build_overnight_setups_report(
+                score=screen.composite.score,
+                direction=screen.composite.direction,
+                snap=d.snap, flags=d.flags, scen=scen,
+                vix=None, hist_n=None, events=[])))
+        except Exception as exc:
+            parts.append(Panel(
+                Text(f"overnight setups unavailable: {exc}", style="yellow"),
+                box=box.ROUNDED))
+        if st.breadth_error:
+            parts.append(Panel(
+                Text(f"Refresh failed, showing last good snapshot: {st.breadth_error}",
+                     style="yellow"), box=box.ROUNDED))
+        self._set(holder, *parts)
+
     def _show_error(self, message: str) -> None:
         self.query_one("#status", Static).update(Text(message, style="bold red"))
 
@@ -308,6 +388,56 @@ class NiftyTerminal(App):
 
     def action_tab(self, tab_id: str) -> None:
         self.query_one(TabbedContent).active = tab_id
+        if tab_id == "breadth" and self.state.breadth is None \
+                and not self.state.breadth_loading:
+            if self.state.history and len(self.state.history.candles) >= 60:
+                self._load_breadth(use_cache=True)
+            else:
+                # Market refresh still in flight — pick this up when it lands.
+                self.state.breadth_pending = True
+
+    def action_refresh_breadth(self) -> None:
+        """'b' — (re)load the 50-stock breadth snapshot in the background."""
+        self._load_breadth(use_cache=False)
+
+    @work(thread=True, group="breadth")
+    def _load_breadth(self, use_cache: bool) -> None:
+        # Own worker group + breadth_loading guard: never stacks, and never
+        # interferes with the 60s market refresh worker.
+        self._refresh_breadth_worker(use_cache)
+
+    def _refresh_breadth_worker(self, use_cache: bool) -> None:
+        from data.constituents import fetch_constituent_history
+        from model.breadth.live import snapshot_detail
+
+        with self.state.lock:
+            if self.state.breadth_loading:
+                return
+            self.state.breadth_loading = True
+        self.call_from_thread(self._render_breadth)
+        try:
+            candles = self.state.history.candles if self.state.history else None
+            if not candles or len(candles) < 60:
+                raise RuntimeError("waiting for NIFTY history — try again in a few seconds")
+            bundle = fetch_constituent_history(period="6mo", use_cache=use_cache)
+            if not bundle.sufficient:
+                raise RuntimeError(
+                    f"thin coverage ({len(bundle.frames)} names, "
+                    f"{bundle.weight_coverage * 100:.0f}% weight)")
+            detail = snapshot_detail(candles, bundle)
+            with self.state.lock:
+                self.state.breadth = detail
+                self.state.breadth_error = None
+        except Exception as exc:
+            with self.state.lock:
+                self.state.breadth_error = str(exc)
+        finally:
+            with self.state.lock:
+                self.state.breadth_loading = False
+        self.call_from_thread(self._render_breadth)
+        if not use_cache:
+            self.call_from_thread(
+                lambda: self.notify("breadth refreshed", timeout=3))
 
     def action_next_expiry(self) -> None:
         chain = self.state.chain
@@ -337,6 +467,13 @@ class NiftyTerminal(App):
                     parts.append(f"{t.direction} @ {t.entry_price:,.2f}")
                 parts.append(t.status)
                 text = " | ".join(parts)
+        elif tab == "breadth" and self.state.breadth is not None:
+            from model.breadth.view import tape_summary
+            d = self.state.breadth
+            nret = d.ctx.get("nifty_ret_1d")
+            nret_bit = f"{nret:+.2f}%" if nret is not None else "n/a"
+            text = f"{d.snap.date} NIFTY {nret_bit} | " \
+                + tape_summary(d.snap, d.flags)
         elif not text:
             hist = self.state.history
             if hist:

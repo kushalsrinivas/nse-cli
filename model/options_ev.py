@@ -358,6 +358,7 @@ def generate_strategy_candidates(
     direction: Direction,
     target_expiry: str | None = None,
     lot_size: int = 75,
+    underlying: str = "NIFTY",
 ) -> list[StrategyCandidate]:
     """Generate and price ITM, ATM, and Debit Spread candidates from option chain."""
     if direction not in (Direction.BULLISH, Direction.BEARISH) or not chain.rows:
@@ -400,7 +401,7 @@ def generate_strategy_candidates(
     candidates.append(StrategyCandidate(
         strategy_type="ATM",
         name=f"ATM {'CE' if is_call else 'PE'} {atm_strike:g}",
-        symbol=f"NIFTY {atm_strike:g} {'CE' if is_call else 'PE'}",
+        symbol=f"{underlying} {atm_strike:g} {'CE' if is_call else 'PE'}",
         is_call=is_call,
         dte=dte,
         expiry=expiry,
@@ -435,7 +436,7 @@ def generate_strategy_candidates(
         candidates.append(StrategyCandidate(
             strategy_type="ITM",
             name=f"ITM {'CE' if is_call else 'PE'} {itm_strike:g}",
-            symbol=f"NIFTY {itm_strike:g} {'CE' if is_call else 'PE'}",
+            symbol=f"{underlying} {itm_strike:g} {'CE' if is_call else 'PE'}",
             is_call=is_call,
             dte=dte,
             expiry=expiry,
@@ -490,7 +491,7 @@ def generate_strategy_candidates(
             candidates.append(StrategyCandidate(
                 strategy_type="DEBIT_SPREAD",
                 name=f"{'Bull' if is_call else 'Bear'} Spread {l_strike:g}/{s_strike:g}",
-                symbol=f"NIFTY {l_strike:g}/{s_strike:g} {'CDS' if is_call else 'PDS'}",
+                symbol=f"{underlying} {l_strike:g}/{s_strike:g} {'CDS' if is_call else 'PDS'}",
                 is_call=is_call,
                 dte=dte,
                 expiry=expiry,

@@ -42,11 +42,33 @@ def cmd_evaluate(args) -> int:
     except Exception as exc:
         console.print(f"[yellow]option chain unavailable: {exc}[/]")
 
-    setup = evaluate(candles=result.candles, chain=chain)
+    setup = evaluate(candles=result.candles, chain=chain,
+                     breadth=_maybe_breadth(args, result.candles))
     render_setup(setup, console)
     if args.show_candidates:
         render_candidates(setup, console)
     return 0
+
+
+def _maybe_breadth(args, nifty_candles=None):
+    """Fetch + assemble tonight's breadth snapshot if `--breadth` was passed."""
+    if not getattr(args, "breadth", False):
+        return None
+    from data.constituents import fetch_constituent_history
+    from model.breadth.live import build_live_snapshot
+    try:
+        bundle = fetch_constituent_history(period="6mo")
+    except Exception as exc:
+        console.print(f"[yellow]constituent data unavailable: {exc} — "
+                      f"NIFTY-only baseline[/]")
+        return None
+    if not bundle.sufficient:
+        console.print(f"[yellow]thin constituent coverage ({len(bundle.frames)} "
+                      f"names, {bundle.weight_coverage * 100:.0f}% weight) — "
+                      f"NIFTY-only baseline[/]")
+        return None
+    snap, flags, ctx = build_live_snapshot(nifty_candles, bundle)
+    return snap
 
 
 def cmd_backtest(args) -> int:
@@ -173,41 +195,262 @@ def cmd_overnight(args) -> int:
         console.print(f"[yellow]option chain unavailable: {exc}[/]")
 
     signals = collect_overnight_signals(result.candles)
+    breadth_snap = _maybe_breadth(args, result.candles)
     setup = build_overnight_setup(result.candles, chain, signals=signals,
-                                  events=args.event or None)
+                                  events=args.event or None, breadth=breadth_snap)
     if args.event:
         console.print("[bold red]⚠ EVENT NIGHT:[/] " +
                       "; ".join(args.event) + " — gap distribution is "
                       "un-modelable; standing rule is NO-GO.")
     render_overnight(setup, console)
 
-    from model.confluence.engine import build_confluence_report
-    from model.confluence.view import render_confluence
-
-    cf_report = build_confluence_report(chain=chain, events=args.event or None)
-    render_confluence(cf_report, console)
+    if breadth_snap is not None:
+        from model.breadth.view import render_breadth as _rb
+        from model.breadth.view import render_divergence as _rd
+        from model.breadth.view import render_scenarios as _rs
+        console.print()
+        _rb(breadth_snap, console)
+        _rd(setup.divergence_flags, console)
+        if setup.scenarios is not None:
+            _rs(setup.scenarios, console)
 
     snap = live_snapshot()
-    if snap:
-        from model.macro import format_level
-        t = Table(title=f"Overnight Macro Board — {snap.headline}", expand=False)
-        t.add_column("Market")
-        t.add_column("Level", justify="right")
-        t.add_column("Since prev close", justify="right")
-        for label, chg, level in snap.rows:
-            style = "green" if chg > 0 else "red" if chg < 0 else ""
-            t.add_row(label,
-                      Text(format_level(label, level), style="dim"),
-                      Text(f"{chg:+.2f}%", style=style))
+    _render_macro_board(snap)
+    return 0
+
+
+def _render_macro_board(snap=None) -> None:
+    """Overnight macro board (S&P/VIX/India VIX/risk pulse). Read-only."""
+    from model.macro import live_snapshot
+
+    snap = snap if snap is not None else live_snapshot()
+    if not snap:
+        return
+    from model.macro import format_level
+    t = Table(title=f"Overnight Macro Board — {snap.headline}", expand=False)
+    t.add_column("Market")
+    t.add_column("Level", justify="right")
+    t.add_column("Since prev close", justify="right")
+    for label, chg, level in snap.rows:
+        style = "green" if chg > 0 else "red" if chg < 0 else ""
+        t.add_row(label,
+                  Text(format_level(label, level), style="dim"),
+                  Text(f"{chg:+.2f}%", style=style))
+    console.print(t)
+    if snap.notes:
+        for note in snap.notes:
+            console.print(f"[dim]{note}[/]")
+
+
+# ---------------------------------------------------------------------------
+# tonight: one fetch, one verdict (the recommended EOD path)
+# ---------------------------------------------------------------------------
+
+# NIFTY-only screen below this score is not worth a 50-ticker breadth fetch.
+TONIGHT_SCREEN_SCORE = 50.0
+TONIGHT_CPERIOD = "6mo"
+
+
+def _fetch_tonight_bundle(args):
+    """Fetch NIFTY history + option chain once; chain failure degrades."""
+    from data import nifty, options as opts
+
+    result = nifty.fetch_history(period=args.period)
+    chain = None
+    try:
+        chain = opts.fetch_chain()
+    except Exception as exc:
+        console.print(f"[yellow]option chain unavailable: {exc}[/]")
+    return result, chain
+
+
+def _fetch_breadth_snapshot(args, nifty_candles):
+    """Constituent snapshot, or Nones (with a reason) when unusable."""
+    from data.constituents import fetch_constituent_history
+    from model.breadth.live import build_live_snapshot
+
+    try:
+        bundle = fetch_constituent_history(period=args.cperiod)
+    except Exception as exc:
+        console.print(f"[yellow]constituent data unavailable: {exc} — "
+                      f"NIFTY-only baseline[/]")
+        return None, None, None
+    if not bundle.sufficient:
+        console.print(f"[yellow]thin constituent coverage ({len(bundle.frames)} "
+                      f"names, {bundle.weight_coverage * 100:.0f}% weight) — "
+                      f"NIFTY-only baseline[/]")
+        return None, None, None
+    return build_live_snapshot(nifty_candles, bundle)
+
+
+def _render_verdict(setup, screen, snap) -> None:
+    """Verdict-first card: the answer up top, evidence compressed to lines."""
+    from rich.panel import Panel
+
+    verdict = "[bold green]GO[/]" if setup.go else "[bold red]NO-GO[/]"
+    base, adj = screen.composite.score, setup.composite.score
+    score_bit = (f"score {base:.0f}" if abs(adj - base) < 0.05
+                 else f"score {base:.0f} → {adj:.0f} "
+                      f"({setup.breadth_points:+.1f} breadth)")
+    lines = [f"{score_bit} · {setup.composite.direction.value.upper()} · "
+             f"{setup.regime.label}"]
+    if snap is not None:
+        if snap.confirming_pct is not None:
+            lines.append(f"breadth {snap.breadth_score:+.0f} ({snap.participation.lower()}, "
+                         f"adv {snap.adv_pct:.0f}%, confirm {snap.confirming_pct:.0f}%)")
+        else:
+            lines.append(f"breadth {snap.breadth_score:+.0f} ({snap.participation.lower()})")
+    if setup.scenarios is not None:
+        sc = setup.scenarios
+        lines.append(f"P(continuation) {sc.continuation_prob:.0%} · "
+                     f"chop/reversal {sc.chop_prob:.0%} · "
+                     f"adverse/event {sc.adverse_gap_prob:.0%}")
+        from model.breadth.scenarios import structure_view
+        prefs = [k for k, v in structure_view(sc).items()
+                 if v.startswith(("preferred", "candidate"))]
+        lines.append(f"structures: {', '.join(prefs) if prefs else 'none'}")
+    if setup.overnight_setups is not None:
+        bits = " · ".join(f"{r.setup_id} {r.short_label}"
+                          for r in setup.overnight_setups.results)
+        lines.append(f"setups: {bits}")
+    if setup.go and setup.chosen_strategy is not None:
+        ev = setup.chosen_strategy
+        lines.append(f"{ev.candidate.name}: EV ₹{ev.net_ev_per_lot:+,.0f}/lot · "
+                     f"P(profit) {ev.p_profitable:.0%}")
+        if setup.sizing is not None:
+            lines.append(f"sizing: {setup.sizing.contracts} lots · "
+                         f"max risk ₹{setup.sizing.max_risk_rupees:,.0f}")
+    else:
+        for r in setup.reasons[:3]:
+            lines.append(f"· {r}")
+        if len(setup.reasons) > 3:
+            lines.append(f"· … +{len(setup.reasons) - 3} more (see --verbose)")
+    console.print(Panel("\n".join(lines),
+                        title=f"[bold]TONIGHT — {verdict}[/]",
+                        expand=False))
+
+
+def cmd_tonight(args) -> int:
+    """One EOD run: fetch once, screen, attach breadth lazily, verdict first.
+
+    Dry run by default (nothing journaled); pass --journal to record.
+    Full audit trail behind --verbose.
+    """
+    from model.overnight import collect_overnight_signals
+    from model.overnight_card import build_overnight_setup
+    from model.overnight_view import render_overnight
+    from model.pipeline import evaluate
+
+    result, chain = _fetch_tonight_bundle(args)
+
+    # 1. Cheap NIFTY-only screen (read-only). Breadth is fetched only if the
+    # base score is within striking distance of a decision.
+    screen = evaluate(candles=result.candles, chain=chain,
+                      use_breadth=False, persist=False)
+    snap = flags = ctx = None
+    if getattr(args, "no_breadth", False):
+        console.print("[dim]breadth disabled (--no-breadth)[/]")
+    elif screen.composite.score >= TONIGHT_SCREEN_SCORE:
+        snap, flags, ctx = _fetch_breadth_snapshot(args, result.candles)
+    else:
+        console.print(f"[dim]breadth skipped: base score "
+                      f"{screen.composite.score:.0f} < screen "
+                      f"{TONIGHT_SCREEN_SCORE:.0f}[/]")
+
+    # 2. Full overnight card (shares the fetched bundle; no refetch).
+    if args.event:
+        console.print("[bold red]⚠ EVENT NIGHT:[/] " +
+                      "; ".join(args.event) + " — gap distribution is "
+                      "un-modelable; standing rule is NO-GO.")
+    signals = collect_overnight_signals(result.candles)
+    setup = build_overnight_setup(result.candles, chain, signals=signals,
+                                  events=args.event or None, breadth=snap,
+                                  record=args.journal)
+
+    # 3. Verdict first, audit behind --verbose.
+    _render_verdict(setup, screen, snap)
+    if args.verbose:
+        render_overnight(setup, console)
+        if setup.overnight_setups is not None:
+            from model.overnight_setups.view import render_overnight_setups as _ro
+            console.print()
+            _ro(setup.overnight_setups, console)
+        if snap is not None:
+            from model.breadth.view import render_breadth as _rb
+            from model.breadth.view import render_divergence as _rd
+            from model.breadth.view import render_scenarios as _rs
+            console.print()
+            _rb(snap, console)
+            _rd(setup.divergence_flags, console)
+            if setup.scenarios is not None:
+                _rs(setup.scenarios, console)
+        _render_macro_board()
+    if not args.journal:
+        console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
+    else:
+        console.print("[dim]recorded to overnight + setup journals[/]")
+    return 0
+
+
+def cmd_stock_overnight(args) -> int:
+    """Per-stock overnight run: naked CE/PE on every name, ranked GO table.
+
+    Dry run by default; --journal records to the separate stock journal.
+    """
+    from model.stock_overnight import evaluate_all
+
+    shorts = [args.symbol.upper()] if args.symbol else None
+    console.print(f"[bold]Stock overnight[/bold] — {args.lots} lot(s) per GO"
+                  f"{'' if shorts is None else f' — {shorts[0]} only'}"
+                  f"{' — RECORDING' if args.journal else ' — dry-run'}")
+
+    def _progress(i: int, n: int, res) -> None:
+        mark = {"GO": "[green]GO[/]", "NO-GO": "[red]NO-GO[/]"}.get(
+            res.decision, f"[yellow]{res.decision}[/]")
+        console.print(f"[{i:>2}/{n}] {res.short:<12} {mark}"
+                      + (f" {res.contract_name} EV ₹{res.expected_value_lot:+,.0f}"
+                         if res.decision == "GO" and res.expected_value_lot else "")
+                      + (f" — {res.error}" if res.error and res.decision != "SKIPPED"
+                         else ""))
+
+    results = evaluate_all(shorts, lots=args.lots, record=args.journal,
+                           events=args.event or None, on_progress=_progress)
+    goes = sorted(
+        (r for r in results if r.decision == "GO"),
+        key=lambda r: -(r.expected_value_lot or 0))
+    nogos = sum(1 for r in results if r.decision == "NO-GO")
+    errs = [(r.short, r.error) for r in results
+            if r.decision in ("ERROR", "SKIPPED") and r.error != "already recorded today"]
+    skipped = sum(1 for r in results if r.error == "already recorded today")
+
+    console.print()
+    if goes:
+        t = Table(title=f"GO — ranked by EV/lot ({len(goes)} names)")
+        for col in ("Symbol", "Dir", "Score", "Contract", "EV/lot",
+                    "P(profit)", "Notional"):
+            t.add_column(col, justify="right" if col != "Symbol" else "left")
+        for r in goes:
+            notional = (r.entry_price or 0) * (r.lot_size or 0) * args.lots
+            t.add_row(r.short, r.direction, f"{r.score:.0f}", r.contract_name,
+                      f"₹{r.expected_value_lot:+,.0f}" if r.expected_value_lot else "—",
+                      f"{r.p_profitable:.0%}" if r.p_profitable else "—",
+                      f"₹{notional:,.0f}")
         console.print(t)
-        if snap.notes:
-            for note in snap.notes:
-                console.print(f"[dim]{note}[/]")
+    else:
+        console.print("[yellow]no GO tonight[/]")
+    console.print(f"[dim]{len(goes)} GO · {nogos} NO-GO · "
+                  f"{len(errs)} errors/skips"
+                  + (f" · {skipped} already recorded" if skipped else "")
+                  + (" · recorded" if args.journal else " · dry-run")
+                  + "[/]")
+    for short, err in errs[:10]:
+        console.print(f"[dim]{short}: {err}[/]")
+    if not args.journal:
+        console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
     return 0
 
 
 def cmd_overnight_journal(args) -> int:
-    """Overnight Trade Journal: complete audit of every GO/NO-GO run."""
     from journal.confluence_db import shared_confluence_journal
     from journal.confluence_perf import compute_confluence_performance
     from journal.overnight_db import shared_overnight_journal
@@ -282,6 +525,64 @@ def cmd_confluence_journal(args) -> int:
     return 0
 
 
+def cmd_breadth(args) -> int:
+    """Tonight's constituent breadth snapshot + overnight scenarios."""
+    from data import nifty
+    from data.constituents import fetch_constituent_history
+    from model.breadth.live import build_live_snapshot
+    from model.breadth.scenarios import build_scenarios, narrative
+    from model.breadth.view import (
+        render_breadth,
+        render_divergence,
+        render_scenarios,
+    )
+    from model.pipeline import evaluate
+
+    result = nifty.fetch_history(period=args.period)
+    try:
+        bundle = fetch_constituent_history(period="6mo")
+    except Exception as exc:
+        console.print(f"[red]constituent fetch failed: {exc}[/]")
+        return 1
+    console.print(f"constituents: {len(bundle.frames)}/{len(bundle.frames) + len(bundle.missing)} "
+                  f"covered, weight {bundle.weight_coverage * 100:.1f}% "
+                  f"{'(sufficient)' if bundle.sufficient else '(THIN)'}")
+    snap, flags, ctx = build_live_snapshot(result.candles, bundle)
+    render_breadth(snap, console)
+    render_divergence(flags, console)
+
+    # Technical posture comes from the (NIFTY-only) pipeline; breadth then
+    # re-weights the scenario odds. persist=False: read-only inspection.
+    setup = evaluate(candles=result.candles, chain=None, use_breadth=False,
+                     persist=False)
+    scen = build_scenarios(setup.composite.direction.value,
+                           setup.composite.score, snap, flags,
+                           event_risk=bool(args.event))
+    render_scenarios(scen, console)
+    console.print(f"\n[bold]EOD read:[/] {narrative(scen, snap, setup.composite.direction.value, ctx.get('nifty_ret_1d'))}")
+    return 0
+
+
+def cmd_breadth_backtest(args) -> int:
+    """Ablation: NIFTY-only vs NIFTY+breadth on shared history."""
+    from data import nifty
+    from data.constituents import fetch_constituent_history
+    from model.breadth.backtest import format_breadth_report, run_comparison
+
+    result = nifty.fetch_history(period=args.period)
+    console.print(f"replaying {len(result.candles)} NIFTY bars ...")
+    try:
+        bundle = fetch_constituent_history(period=args.period)
+    except Exception as exc:
+        console.print(f"[red]constituent fetch failed: {exc}[/]")
+        return 1
+    console.print(f"constituents: {len(bundle.frames)} covered, "
+                  f"weight {bundle.weight_coverage * 100:.1f}%")
+    comp = run_comparison(result.candles, bundle.frames)
+    console.print(format_breadth_report(comp))
+    return 0
+
+
 def cmd_research(args) -> int:
     """Historical research: what follows qualifying closes?"""
     from data import nifty
@@ -320,6 +621,8 @@ def main() -> int:
     ev.add_argument("--interval", default="1d")
     ev.add_argument("--candidates", dest="show_candidates", action="store_true",
                     help="also print the option-candidate comparison table")
+    ev.add_argument("--breadth", action="store_true",
+                    help="attach tonight's constituent breadth snapshot (bounded ±8pts)")
 
     bt = sub.add_parser("backtest", help="walk-forward simulation report")
     bt.add_argument("--period", default="2y")
@@ -336,6 +639,8 @@ def main() -> int:
 
     ov = sub.add_parser("overnight", help="tonight's GO/NO-GO card for the overnight play")
     ov.add_argument("--period", default="2y")
+    ov.add_argument("--breadth", action="store_true",
+                    help="attach constituent breadth + scenarios to the overnight card")
     ov.add_argument("--event", action="append", default=[],
                     help="known scheduled risk tonight, e.g. "
                          "--event 'US-Iran sanctions' (repeatable). "
@@ -358,6 +663,37 @@ def main() -> int:
     cj.add_argument("--settle", nargs=2, metavar=("ID", "EXIT_PRICE"))
     cj.add_argument("--notes", default=None)
 
+    br = sub.add_parser("breadth", help="tonight's constituent breadth + scenarios")
+    br.add_argument("--period", default="1y")
+    br.add_argument("--event", action="append", default=[],
+                    help="scheduled risk tonight (forces event-vol scenario weight)")
+
+    bb = sub.add_parser("breadth-backtest", help="ablation: NIFTY-only vs NIFTY+breadth")
+    bb.add_argument("--period", default="2y")
+
+    tn = sub.add_parser("tonight", help="one EOD run: fetch once, verdict first (dry-run default)")
+    tn.add_argument("--period", default="2y")
+    tn.add_argument("--cperiod", default=TONIGHT_CPERIOD,
+                    help="constituent history window (default 6mo)")
+    tn.add_argument("--event", action="append", default=[],
+                    help="known scheduled risk tonight (repeatable)")
+    tn.add_argument("--verbose", action="store_true",
+                    help="full EV bridge + breadth + macro audit trail")
+    tn.add_argument("--journal", action="store_true",
+                    help="record to overnight + setup journals (default: dry-run)")
+    tn.add_argument("--no-breadth", action="store_true",
+                    help="skip the constituent layer (NIFTY-only)")
+
+    so = sub.add_parser("stock-overnight", help="naked CE/PE overnight per stock, ranked GO table")
+    so.add_argument("--lots", type=int, default=1,
+                    help="fixed lots per GO signal (default 1)")
+    so.add_argument("--symbol", default=None,
+                    help="single NSE symbol (e.g. RELIANCE) instead of all 50")
+    so.add_argument("--journal", action="store_true",
+                    help="record to the separate stock journal (default: dry-run)")
+    so.add_argument("--event", action="append", default=[],
+                    help="known scheduled risk tonight (repeatable)")
+
     args = p.parse_args()
     cmd_map = {
         "evaluate": cmd_evaluate,
@@ -368,6 +704,10 @@ def main() -> int:
         "research": cmd_research,
         "overnight-journal": cmd_overnight_journal,
         "oj": cmd_overnight_journal,
+        "breadth": cmd_breadth,
+        "breadth-backtest": cmd_breadth_backtest,
+        "tonight": cmd_tonight,
+        "stock-overnight": cmd_stock_overnight,
         "confluence-journal": cmd_confluence_journal,
         "cj": cmd_confluence_journal,
     }

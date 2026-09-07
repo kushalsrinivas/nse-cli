@@ -27,9 +27,22 @@ log = logging.getLogger(__name__)
 
 NSE_BASE = "https://www.nseindia.com"
 NSE_CHAIN_URL = (
-    f"{NSE_BASE}/api/option-chain-v3?type=Indices&symbol={{symbol}}&expiry={{expiry}}"
+    f"{NSE_BASE}/api/option-chain-v3?type={{kind}}&symbol={{symbol}}&expiry={{expiry}}"
 )
 NSE_CONTRACT_INFO_URL = f"{NSE_BASE}/api/option-chain-contract-info?symbol={{symbol}}"
+
+# Symbols traded as indices on NSE; everything else fetches as Equities.
+INDEX_SYMBOLS = frozenset({
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50",
+})
+
+
+def chain_kind(symbol: str) -> str:
+    """'Indices' for index symbols, 'Equities' otherwise."""
+    s = symbol.upper().strip()
+    if s.startswith("^"):
+        return "Indices"
+    return "Indices" if s in INDEX_SYMBOLS else "Equities"
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -90,11 +103,12 @@ class OptionChainProvider(ABC):
     name: str = "abstract"
 
     @abstractmethod
-    def expiries(self, symbol: str) -> tuple[str, ...]:
+    def expiries(self, symbol: str, kind: str | None = None) -> tuple[str, ...]:
         ...
 
     @abstractmethod
-    def chain(self, symbol: str, expiry: str | None = None) -> OptionChain:
+    def chain(self, symbol: str, expiry: str | None = None,
+              kind: str | None = None) -> OptionChain:
         ...
 
 
@@ -188,9 +202,11 @@ class NSEOptionChainProvider(OptionChainProvider):
 
     # -- provider API ------------------------------------------------------------
 
-    def chain(self, symbol: str, expiry: str | None = None) -> OptionChain:
+    def chain(self, symbol: str, expiry: str | None = None,
+              kind: str | None = None) -> OptionChain:
+        kind = kind or chain_kind(symbol)
         nse_expiry = self._nse_expiry_format(expiry) if expiry else None
-        expiries = self.expiries(symbol)
+        expiries = self.expiries(symbol, kind)
         if not expiries:
             raise OptionsDataError("NSE returned no expiry dates")
 
@@ -204,7 +220,7 @@ class NSEOptionChainProvider(OptionChainProvider):
                     f"expiry {target} not available; choose from {', '.join(expiries)}"
                 )
 
-        url = NSE_CHAIN_URL.format(symbol=symbol.upper(), expiry=nse_expiry)
+        url = NSE_CHAIN_URL.format(kind=kind, symbol=symbol.upper(), expiry=nse_expiry)
         payload = self._get_json(url)
         records = payload.get("records", {})
 
@@ -229,7 +245,7 @@ class NSEOptionChainProvider(OptionChainProvider):
             fetched_at=datetime.now(),
         )
 
-    def expiries(self, symbol: str) -> tuple[str, ...]:
+    def expiries(self, symbol: str, kind: str | None = None) -> tuple[str, ...]:
         payload = self._get_json(NSE_CONTRACT_INFO_URL.format(symbol=symbol.upper()))
         return tuple(sorted(self._parse_expiry(e) for e in payload.get("expiryDates", [])))
 
@@ -277,23 +293,27 @@ def fetch_chain(
     symbol: str = SETTINGS.option_symbol,
     expiry: str | None = None,
     use_cache: bool = True,
+    kind: str | None = None,
 ) -> OptionChain:
-    params = {"symbol": symbol, "expiry": expiry}
+    kind = kind or chain_kind(symbol)
+    params = {"symbol": symbol, "expiry": expiry, "kind": kind}
     cache = shared_cache()
     if use_cache:
         cached = cache.get("options_chain", params, ttl=SETTINGS.options_ttl_seconds)
         if cached is not None:
             return cached
 
-    chain = _default_provider.chain(symbol, expiry)
+    chain = _default_provider.chain(symbol, expiry, kind)
     cache.set(chain, "options_chain", params)
     return chain
 
 
-def fetch_expiries(symbol: str = SETTINGS.option_symbol) -> tuple[str, ...]:
-    cached = shared_cache().get("options_expiries", {"symbol": symbol}, ttl=SETTINGS.options_ttl_seconds)
+def fetch_expiries(symbol: str = SETTINGS.option_symbol,
+                   kind: str | None = None) -> tuple[str, ...]:
+    kind = kind or chain_kind(symbol)
+    cached = shared_cache().get("options_expiries", {"symbol": symbol, "kind": kind}, ttl=SETTINGS.options_ttl_seconds)
     if cached:
         return cached
-    expiries = _default_provider.expiries(symbol)
-    shared_cache().set(expiries, "options_expiries", {"symbol": symbol})
+    expiries = _default_provider.expiries(symbol, kind)
+    shared_cache().set(expiries, "options_expiries", {"symbol": symbol, "kind": kind})
     return expiries

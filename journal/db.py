@@ -207,13 +207,21 @@ class Journal:
                    option_type: str = "", strike: float | None = None,
                    expiry: str = "", lots: int | None = None,
                    lot_size: int | None = None,
-                   delta_entry: float | None = None) -> Trade:
+                    delta_entry: float | None = None) -> Trade:
         states = states or {}
+        normalized = direction.lower()
+        if normalized not in ("long", "short"):
+            raise ValueError(
+                f"direction must be 'long' or 'short', got {direction!r}")
+        opt = option_type.upper()
+        if opt not in ("", "CE", "PE"):
+            raise ValueError(
+                f"option_type must be 'CE' or 'PE', got {option_type!r}")
         return self.add(Trade(
             id=None,
             timestamp=(timestamp or datetime.now()).isoformat(timespec="seconds"),
             instrument=instrument,
-            direction="long" if direction.lower().startswith("l") else "short",
+            direction=normalized,
             entry_price=float(entry_price),
             quantity=float(quantity),
             stop_loss=stop_loss,
@@ -224,7 +232,7 @@ class Journal:
             ema_state=states.get("ema", ""),
             sma_state=states.get("sma", ""),
             volume_state=states.get("volume", ""),
-            option_type=option_type.upper(),
+            option_type=opt,
             strike=strike,
             expiry=expiry,
             lots=lots,
