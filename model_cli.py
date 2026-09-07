@@ -51,24 +51,13 @@ def cmd_evaluate(args) -> int:
 
 
 def _maybe_breadth(args, nifty_candles=None):
-    """Fetch + assemble tonight's breadth snapshot if `--breadth` was passed."""
-    if not getattr(args, "breadth", False):
-        return None
-    from data.constituents import fetch_constituent_history
-    from model.breadth.live import build_live_snapshot
-    try:
-        bundle = fetch_constituent_history(period="6mo")
-    except Exception as exc:
-        console.print(f"[yellow]constituent data unavailable: {exc} — "
-                      f"NIFTY-only baseline[/]")
-        return None
-    if not bundle.sufficient:
-        console.print(f"[yellow]thin constituent coverage ({len(bundle.frames)} "
-                      f"names, {bundle.weight_coverage * 100:.0f}% weight) — "
-                      f"NIFTY-only baseline[/]")
-        return None
-    snap, flags, ctx = build_live_snapshot(nifty_candles, bundle)
-    return snap
+    """Snapshot for the legacy --breadth flags (thin wrapper; see services)."""
+    from services.bundles import breadth_snapshot
+    out = breadth_snapshot(enabled=bool(getattr(args, "breadth", False)),
+                           nifty_candles=nifty_candles)
+    for kind, msg in out.notices:
+        console.print(f"[yellow]{msg}[/]" if kind == "warn" else f"[dim]{msg}[/]")
+    return out.snap
 
 
 def cmd_backtest(args) -> int:
@@ -246,44 +235,15 @@ def _render_macro_board(snap=None) -> None:
 # tonight: one fetch, one verdict (the recommended EOD path)
 # ---------------------------------------------------------------------------
 
-# NIFTY-only screen below this score is not worth a 50-ticker breadth fetch.
-TONIGHT_SCREEN_SCORE = 50.0
 TONIGHT_CPERIOD = "6mo"
 
 
-def _fetch_tonight_bundle(args):
-    """Fetch NIFTY history + option chain once; chain failure degrades."""
-    from data import nifty, options as opts
-
-    result = nifty.fetch_history(period=args.period)
-    chain = None
-    try:
-        chain = opts.fetch_chain()
-    except Exception as exc:
-        console.print(f"[yellow]option chain unavailable: {exc}[/]")
-    return result, chain
+def _notice_print(notices) -> None:
+    for kind, msg in notices:
+        console.print(f"[yellow]{msg}[/]" if kind == "warn" else f"[dim]{msg}[/]")
 
 
-def _fetch_breadth_snapshot(args, nifty_candles):
-    """Constituent snapshot, or Nones (with a reason) when unusable."""
-    from data.constituents import fetch_constituent_history
-    from model.breadth.live import build_live_snapshot
-
-    try:
-        bundle = fetch_constituent_history(period=args.cperiod)
-    except Exception as exc:
-        console.print(f"[yellow]constituent data unavailable: {exc} — "
-                      f"NIFTY-only baseline[/]")
-        return None, None, None
-    if not bundle.sufficient:
-        console.print(f"[yellow]thin constituent coverage ({len(bundle.frames)} "
-                      f"names, {bundle.weight_coverage * 100:.0f}% weight) — "
-                      f"NIFTY-only baseline[/]")
-        return None, None, None
-    return build_live_snapshot(nifty_candles, bundle)
-
-
-def _render_verdict(setup, screen, snap) -> None:
+def _render_verdict(setup, screen, snap, kite_meta=None) -> None:
     """Verdict-first card: the answer up top, evidence compressed to lines."""
     from rich.panel import Panel
 
@@ -313,6 +273,10 @@ def _render_verdict(setup, screen, snap) -> None:
         bits = " · ".join(f"{r.setup_id} {r.short_label}"
                           for r in setup.overnight_setups.results)
         lines.append(f"setups: {bits}")
+    if kite_meta:
+        lines.append("source: kite (fut-vol proxy, basis " +
+                     str(kite_meta.get("basis_bps")) + "bp, fut ΔOI " +
+                     str(kite_meta.get("fut_oi_chg_pct")) + "%)")
     if setup.go and setup.chosen_strategy is not None:
         ev = setup.chosen_strategy
         lines.append(f"{ev.candidate.name}: EV ₹{ev.net_ev_per_lot:+,.0f}/lot · "
@@ -334,41 +298,26 @@ def cmd_tonight(args) -> int:
     """One EOD run: fetch once, screen, attach breadth lazily, verdict first.
 
     Dry run by default (nothing journaled); pass --journal to record.
-    Full audit trail behind --verbose.
+    Full audit trail behind --verbose. Workflow lives in
+    services/tonight.py; this command only parses args and renders.
     """
-    from model.overnight import collect_overnight_signals
-    from model.overnight_card import build_overnight_setup
+    from data.kite.auth import KiteAuthError
     from model.overnight_view import render_overnight
-    from model.pipeline import evaluate
+    from services.tonight import run_tonight
 
-    result, chain = _fetch_tonight_bundle(args)
-
-    # 1. Cheap NIFTY-only screen (read-only). Breadth is fetched only if the
-    # base score is within striking distance of a decision.
-    screen = evaluate(candles=result.candles, chain=chain,
-                      use_breadth=False, persist=False)
-    snap = flags = ctx = None
-    if getattr(args, "no_breadth", False):
-        console.print("[dim]breadth disabled (--no-breadth)[/]")
-    elif screen.composite.score >= TONIGHT_SCREEN_SCORE:
-        snap, flags, ctx = _fetch_breadth_snapshot(args, result.candles)
-    else:
-        console.print(f"[dim]breadth skipped: base score "
-                      f"{screen.composite.score:.0f} < screen "
-                      f"{TONIGHT_SCREEN_SCORE:.0f}[/]")
-
-    # 2. Full overnight card (shares the fetched bundle; no refetch).
-    if args.event:
-        console.print("[bold red]⚠ EVENT NIGHT:[/] " +
-                      "; ".join(args.event) + " — gap distribution is "
-                      "un-modelable; standing rule is NO-GO.")
-    signals = collect_overnight_signals(result.candles)
-    setup = build_overnight_setup(result.candles, chain, signals=signals,
-                                  events=args.event or None, breadth=snap,
-                                  record=args.journal)
+    try:
+        result = run_tonight(
+            period=args.period, source=getattr(args, "source", "yahoo") or "yahoo",
+            cperiod=args.cperiod, no_breadth=getattr(args, "no_breadth", False),
+            events=args.event or None, journal=args.journal)
+    except KiteAuthError as exc:
+        console.print(f"[red]{exc}[/]")
+        return 1
+    _notice_print(result.notices)
+    setup, screen, snap = result.setup, result.screen, result.snap
 
     # 3. Verdict first, audit behind --verbose.
-    _render_verdict(setup, screen, snap)
+    _render_verdict(setup, screen, snap, kite_meta=result.kite_meta)
     if args.verbose:
         render_overnight(setup, console)
         if setup.overnight_setups is not None:
@@ -392,16 +341,261 @@ def cmd_tonight(args) -> int:
     return 0
 
 
+def cmd_kite_master(args) -> int:
+    """Refresh the instrument master and show segment counts."""
+    from services.kite_ops import refresh_master
+
+    try:
+        summary = refresh_master(tuple(args.exchange or ("NSE", "NFO")))
+    except Exception as exc:
+        console.print(f"[red]{exc}[/]")
+        return 1
+    console.print(f"[green]master as of {summary['as_of']}[/] "
+                  f"({summary['seen']} rows)")
+    for seg, n in sorted(summary["segments"].items(), key=lambda kv: -kv[1]):
+        console.print(f"  {seg:<10} {n:>7}")
+    return 0
+
+
+def cmd_kite_parity(args) -> int:
+    """Kite vs incumbents: index/constituent closes + NIFTY chain LTPs."""
+    from data.kite.auth import KiteAuthError
+    from services.kite_ops import run_parity
+
+    def _on_leg(leg) -> None:
+        if leg.status == "pass":
+            console.print("[green]PASS[/] " + leg.name + " (" + leg.detail + ")")
+        elif leg.status == "fail":
+            console.print("[red]FAIL[/] " + leg.name + ": " + leg.detail)
+            for d, v in leg.worst:
+                console.print("    " + d + "  Δ " + str(v) + "%")
+        else:
+            console.print("[yellow]SKIP[/] " + leg.name + ": " + leg.detail)
+
+    try:
+        report = run_parity(days=args.days, all_stocks=args.all_stocks,
+                            on_leg=_on_leg)
+    except KiteAuthError as exc:
+        console.print(f"[red]{exc}[/]")
+        return 1
+    if not report.failures:
+        console.print("[green]parity clean[/]")
+    else:
+        console.print("[red]" + str(report.failures) + " failing leg(s)[/]")
+    return 1 if report.failures else 0
+
+
+def cmd_kite_live(args) -> int:
+    """Stream WS ticks (NIFTY + 50 stocks), aggregate 1m candles, live tape.
+
+    Shadow mode: prints what the live tape sees; persists settled 1m
+    candles + an EOD 1d candle per token on exit. Ctrl-C flushes cleanly.
+    """
+    import asyncio
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from data.kite import instruments as ki
+    from data.kite.aggregator import TickAggregator
+    from data.kite.auth import load_session
+    from data.kite.candles import CandleStore
+    from data.kite.rest import KiteRest
+    from data.kite.store import InstrumentStore
+    from data.kite.ws import KiteWS
+    from model.breadth.universe import get_universe
+
+    IST = ZoneInfo("Asia/Kolkata")
+    try:
+        from data.kite.config import credentials
+        creds = credentials()
+    except Exception as exc:
+        console.print(f"[red]{exc}[/]")
+        return 1
+    session = load_session()
+    from data.kite.auth import session_valid
+    if not session_valid(session):
+        console.print("[red]no valid kite session — run `model_cli.py kite-login`[/]")
+        return 1
+
+    rest = KiteRest()
+    store = InstrumentStore()
+    ki.refresh_master(rest, store)
+    shorts = [c.short for c in get_universe()]
+    tokens = ki.universe_tokens(store, shorts)
+    nifty_token = ki.nifty_spot_token(store)
+    if nifty_token is None:
+        console.print("[red]NIFTY spot token missing from master[/]")
+        return 1
+    by_token = {t: s for s, t in tokens.items()}
+    by_token[nifty_token] = "NIFTY 50"
+    all_tokens = sorted(by_token)
+    console.print(f"[bold]kite-live[/bold]: streaming {len(all_tokens)} tokens "
+                  f"(NIFTY + {len(tokens)} stocks, quote mode)")
+
+    agg = TickAggregator()
+    candles = CandleStore()
+    latest: dict[int, dict] = {}
+
+    def _ingest(ticks: list[dict], stats: dict) -> None:
+        for t in ticks:
+            latest[t["token"]] = t
+            for settled in agg.on_tick(t):
+                candles.upsert_1m([settled])
+
+    def _tape() -> None:
+        rows = []
+        adv_vol = dec_vol = 0.0
+        for tok, t in latest.items():
+            if tok == nifty_token or t.get("close") in (None, 0):
+                continue
+            chg = (t["ltp"] - t["close"]) / t["close"] * 100
+            vol = t.get("volume") or 0
+            if chg > 0.05:
+                adv_vol += vol
+            elif chg < -0.05:
+                dec_vol += vol
+            rows.append((by_token.get(tok, str(tok)), chg, t["ltp"]))
+        if not rows:
+            console.print("[dim]tape: no ticks yet[/]")
+            return
+        rows.sort(key=lambda r: r[1], reverse=True)
+        adv = sum(1 for r in rows if r[1] > 0.05)
+        dec = sum(1 for r in rows if r[1] < -0.05)
+        total_v = adv_vol + dec_vol
+        now = datetime.now(tz=IST).strftime("%H:%M:%S")
+        top = ", ".join(s + " " + ("%+.2f%%" % c) for s, c, _ in rows[:5])
+        bot = ", ".join(s + " " + ("%+.2f%%" % c) for s, c, _ in rows[-5:])
+        if total_v:
+            console.print("[bold]" + now + "[/] adv " + str(adv) + " / dec " +
+                          str(dec) + " / flat " + str(len(rows) - adv - dec) +
+                          "  adv-vol " + str(round(adv_vol / total_v * 100)) + "%")
+        else:
+            console.print("[bold]" + now + "[/] adv " + str(adv) + " / dec " +
+                          str(dec) + " (no volume yet)")
+        console.print("  top: " + top)
+        console.print("  flop: " + bot)
+
+    async def _main() -> None:
+        client = KiteWS(creds.api_key, session["access_token"],
+                        on_ticks=_ingest)
+        task = asyncio.create_task(client.run())
+        await client.subscribe(all_tokens, "quote")
+        deadline = None if args.minutes <= 0 else (
+            asyncio.get_running_loop().time() + args.minutes * 60)
+        try:
+            last_tape = 0.0
+            while True:
+                await asyncio.sleep(5)
+                now = asyncio.get_running_loop().time()
+                if now - last_tape >= args.tape_every:
+                    _tape()
+                    last_tape = now
+                if deadline is not None and now >= deadline:
+                    break
+        finally:
+            await client.close()
+            await task
+            settled = agg.flush()
+            if settled:
+                candles.upsert_1m(settled)
+            _eod_flush(candles, list(by_token))
+            console.print(f"[dim]stored {len(settled)} final candles · "
+                          f"agg counters: {agg.counters} · "
+                          f"ws: {client.counters}[/]")
+
+    try:
+        asyncio.run(_main())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]interrupted — flushed cleanly[/]")
+    return 0
+
+
+def _eod_flush(candles, tokens: list[int], date: str | None = None) -> None:
+    """Build the day's 1d candle per token from stored 1m rows."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from data.kite.candles import DayCandle
+    today = date or datetime.now(tz=ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
+    days = []
+    for tok in tokens:
+        frame = candles.read_1m(tok, today + " 00:00", today + " 23:59")
+        if frame.empty:
+            continue
+        days.append(DayCandle(
+            token=tok, date=today, open=round(float(frame["open"].iloc[0]), 2),
+            high=round(float(frame["high"].max()), 2),
+            low=round(float(frame["low"].min()), 2),
+            close=round(float(frame["close"].iloc[-1]), 2),
+            volume=int(frame["volume"].sum()),
+            oi=(int(frame["oi"].dropna().iloc[-1])
+                if "oi" in frame and frame["oi"].notna().any() else None)))
+    if days:
+        candles.upsert_1d(days)
+        console.print(f"[green]EOD: {len(days)} daily candles stored for {today}[/]")
+    candles.prune_1m()
+
+
+def cmd_kite_login(args) -> int:
+    """Kite session manager: login URL, token exchange, status, logout.
+
+    Step 1: `model_cli.py kite-login` (prints the login URL).
+    Step 2: log in via browser, copy `?request_token=...` from the redirect.
+    Step 3: `model_cli.py kite-login --request-token ...` (stores session).
+    Session lasts until 6 AM IST next day; credentials come from
+    KITE_API_KEY / KITE_API_SECRET only.
+    """
+    from data.kite import auth
+    from data.kite.config import KiteConfigError, credentials
+
+    if args.logout:
+        if auth.clear_session():
+            console.print("[green]kite session cleared[/]")
+        else:
+            console.print("no kite session stored")
+        return 0
+
+    try:
+        creds = credentials()
+    except KiteConfigError as exc:
+        console.print(f"[red]{exc}[/]")
+        return 1
+
+    if args.request_token:
+        try:
+            session = auth.exchange_token(args.request_token)
+        except auth.KiteAuthError as exc:
+            console.print(f"[red]{exc}[/]")
+            return 1
+        path = auth.save_session(session)
+        console.print(f"[green]session stored → {path}[/] "
+                      f"(user {session.get('user_id')}, "
+                      f"valid {auth.status().get('expires', '?')})")
+        return 0
+
+    st = auth.status()
+    if st["state"] == "valid":
+        console.print(f"[green]kite session valid[/] (user {st.get('user_id')}, "
+                      f"expires {st.get('expires')})")
+    else:
+        console.print(f"[yellow]kite session {st['state']}[/] — "
+                      f"open this URL, log in, then re-run with --request-token:")
+        console.print(f"  {auth.login_url(creds.api_key)}")
+    return 0
+
+
 def cmd_stock_overnight(args) -> int:
     """Per-stock overnight run: naked CE/PE on every name, ranked GO table.
 
     Dry run by default; --journal records to the separate stock journal.
+    Workflow lives in services/stock_screen.py; this command renders.
     """
-    from model.stock_overnight import evaluate_all
+    from services.stock_screen import run_stock_screen
 
     shorts = [args.symbol.upper()] if args.symbol else None
+    source = getattr(args, "source", "yahoo") or "yahoo"
     console.print(f"[bold]Stock overnight[/bold] — {args.lots} lot(s) per GO"
                   f"{'' if shorts is None else f' — {shorts[0]} only'}"
+                  f" — {source}"
                   f"{' — RECORDING' if args.journal else ' — dry-run'}")
 
     def _progress(i: int, n: int, res) -> None:
@@ -413,8 +607,10 @@ def cmd_stock_overnight(args) -> int:
                       + (f" — {res.error}" if res.error and res.decision != "SKIPPED"
                          else ""))
 
-    results = evaluate_all(shorts, lots=args.lots, record=args.journal,
-                           events=args.event or None, on_progress=_progress)
+    results = run_stock_screen(symbols=shorts, lots=args.lots,
+                               record=args.journal,
+                               events=args.event or None,
+                               source=source, on_progress=_progress)
     goes = sorted(
         (r for r in results if r.decision == "GO"),
         key=lambda r: -(r.expected_value_lot or 0))
@@ -673,6 +869,8 @@ def main() -> int:
 
     tn = sub.add_parser("tonight", help="one EOD run: fetch once, verdict first (dry-run default)")
     tn.add_argument("--period", default="2y")
+    tn.add_argument("--source", default="yahoo", choices=("yahoo", "kite"),
+                    help="market-data source (kite needs a session; default yahoo)")
     tn.add_argument("--cperiod", default=TONIGHT_CPERIOD,
                     help="constituent history window (default 6mo)")
     tn.add_argument("--event", action="append", default=[],
@@ -693,6 +891,30 @@ def main() -> int:
                     help="record to the separate stock journal (default: dry-run)")
     so.add_argument("--event", action="append", default=[],
                     help="known scheduled risk tonight (repeatable)")
+    so.add_argument("--source", default="yahoo", choices=("yahoo", "kite"),
+                    help="history+chain source (kite needs a session; default yahoo)")
+
+    kl = sub.add_parser("kite-login", help="Kite session: login URL / token exchange / status")
+    kl.add_argument("--request-token", default=None,
+                    help="request_token from the login redirect (step 2)")
+    kl.add_argument("--logout", action="store_true",
+                    help="delete the stored session")
+
+    km = sub.add_parser("kite-master", help="Refresh the Kite instrument master + show counts")
+    km.add_argument("--exchange", action="append", default=[],
+                    help="limit to exchange (repeatable; default NSE+NFO)")
+
+    kp = sub.add_parser("kite-parity", help="Kite vs incumbent sources (closes + chain LTPs)")
+    kp.add_argument("--days", type=int, default=60,
+                    help="lookback in calendar days (default 60)")
+    kp.add_argument("--all", dest="all_stocks", action="store_true",
+                    help="check all 50 constituents (default: 5-name sample)")
+
+    kl2 = sub.add_parser("kite-live", help="stream Kite WS ticks, aggregate 1m candles, live tape")
+    kl2.add_argument("--minutes", type=float, default=375,
+                     help="stream duration in minutes, 0 = until Ctrl-C (default 375)")
+    kl2.add_argument("--tape-every", type=int, default=300,
+                     help="live tape interval in seconds (default 300)")
 
     args = p.parse_args()
     cmd_map = {
@@ -708,6 +930,10 @@ def main() -> int:
         "breadth-backtest": cmd_breadth_backtest,
         "tonight": cmd_tonight,
         "stock-overnight": cmd_stock_overnight,
+        "kite-login": cmd_kite_login,
+        "kite-master": cmd_kite_master,
+        "kite-parity": cmd_kite_parity,
+        "kite-live": cmd_kite_live,
         "confluence-journal": cmd_confluence_journal,
         "cj": cmd_confluence_journal,
     }
