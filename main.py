@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
                         help="filter journal: all|go|no-go|actual|hypo|ce|pe|setup-a|setup-b|setup-c")
     parser.add_argument("--tonight", action="store_true",
                         help="one EOD run: fetch once, verdict first (dry-run default, no TUI)")
+    parser.add_argument("--source", default="yahoo", choices=("yahoo", "kite"),
+                        help="with --tonight/--stock-overnight: market-data source (default yahoo)")
     parser.add_argument("--event", action="append", default=[],
                         help="known scheduled risk tonight, e.g. --event 'RBI policy' (repeatable)")
     parser.add_argument("--verbose", action="store_true",
@@ -67,7 +69,7 @@ def main() -> int:
         ns = _types.SimpleNamespace(
             period=args.period or "2y", cperiod=args.cperiod, event=args.event,
             verbose=args.verbose, journal=args.journal,
-            no_breadth=args.no_breadth)
+            no_breadth=args.no_breadth, source=args.source)
         return model_cli.cmd_tonight(ns)
 
     if args.confluence:
@@ -95,7 +97,7 @@ def main() -> int:
         import model_cli
         ns = _types.SimpleNamespace(
             symbol=args.symbol, lots=args.lots, journal=args.journal,
-            event=args.event)
+            event=args.event, source=args.source)
         return model_cli.cmd_stock_overnight(ns)
 
     if args.settle_stock:

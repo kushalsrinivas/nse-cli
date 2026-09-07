@@ -3,3 +3,5 @@ pandas>=2.2
 requests>=2.32
 rich>=13.7
 textual>=1.0
+kiteconnect>=5.2.1  # Kite market-data service (REST/master; WS parser is ours)
+websockets>=15.0    # Kite WS streaming client (own protocol parser)

@@ -79,17 +79,54 @@ def frame_to_candles(frame: pd.DataFrame) -> list[nifty_data.Candle]:
     ]
 
 
+def _kite_chain_first(short: str, spot: float | None, rest, store):
+    """Kite-assembled chain primary, NSE scrape fallback (both may fail)."""
+    if spot and rest is not None and store is not None:
+        try:
+            from data.kite.chain import KiteChainProvider
+            chain, _quotes = KiteChainProvider(rest, store).chain_for(short, spot)
+            return chain
+        except Exception as exc:
+            log.warning("%s kite chain failed (%s); NSE fallback", short, exc)
+    try:
+        return opts.fetch_chain(symbol=short)
+    except Exception as exc:
+        log.warning("%s chain unavailable: %s", short, exc)
+        return None
+
+
+def _kite_expiries(short: str, chain, store) -> list[str] | None:
+    if chain is not None:
+        return list(chain.expiries)
+    if store is not None:
+        try:
+            from data.kite import instruments as ki
+            exp = ki.option_expiries(store, short)
+            if exp:
+                return exp
+        except Exception as exc:
+            log.warning("%s master expiries failed: %s", short, exc)
+    try:
+        return list(opts.fetch_expiries(symbol=short))
+    except Exception:
+        return None
+
+
 def evaluate_stock(short: str, *, lots: int = 1,
                    bundle: ConstituentBundle | None = None,
                    chain: opts.OptionChain | None = None,
                    expiries: list[str] | None = None,
                    events: list[str] | None = None,
                    record: bool = False,
-                   journal=None) -> StockOvernightResult:
+                   journal=None,
+                   source: str = "yahoo",
+                   rest=None, store=None) -> StockOvernightResult:
     """One symbol, full overnight card, naked CE/PE only (user constraint).
 
-    Read-only unless `record=True` + `journal` (a stock journal): then the
-    GO/NO-GO run is recorded there. Never touches the NIFTY journals.
+    source="kite" pulls history + chain from Kite (session required) with
+    NSE fallback for the chain; spot history always yields to Kite day
+    candles. Read-only unless `record=True` + `journal` (a stock journal):
+    then the GO/NO-GO run is recorded there. Never touches NIFTY journals.
     """
     from model.overnight import collect_overnight_signals
     from model.overnight_card import build_overnight_setup
@@ -102,37 +139,63 @@ def evaluate_stock(short: str, *, lots: int = 1,
         res.error = str(exc)
         return res
     settings = dataclasses.replace(SETTINGS, lot_size=res.lot_size)
+    basis_bps, fut_oi_chg = None, None
 
     try:
-        if bundle is None:
-            bundle = fetch_constituent_history(period=HISTORY_PERIOD)
-        yahoo_sym = next((c.symbol for c in get_universe() if c.short == short), None)
-        frame = bundle.frames.get(yahoo_sym or "")
-        if frame is None or len(frame) < MIN_BARS:
-            res.decision = "SKIPPED"
-            res.error = (f"insufficient history "
-                         f"({len(frame) if frame is not None else 0} < {MIN_BARS} bars)")
-            return res
-        candles = frame_to_candles(frame)
+        if source == "kite":
+            from data.kite.eod import eod_context
+            ctx = eod_context(short, rest=rest, store=store)
+            candles = ctx.candles
+            basis_bps, fut_oi_chg = ctx.basis_bps, ctx.fut_oi_chg_pct
+            if len(candles) < MIN_BARS:
+                res.decision = "SKIPPED"
+                res.error = (f"insufficient kite history "
+                             f"({len(candles)} < {MIN_BARS} bars)")
+                return res
+            if chain is None:
+                chain = _kite_chain_first(short, ctx.spot, rest, store)
+            if expiries is None:
+                expiries = _kite_expiries(short, chain, store)
+        else:
+            if bundle is None:
+                bundle = fetch_constituent_history(period=HISTORY_PERIOD)
+            yahoo_sym = next((c.symbol for c in get_universe() if c.short == short), None)
+            frame = bundle.frames.get(yahoo_sym or "")
+            if frame is None or len(frame) < MIN_BARS:
+                res.decision = "SKIPPED"
+                res.error = (f"insufficient history "
+                             f"({len(frame) if frame is not None else 0} < {MIN_BARS} bars)")
+                return res
+            candles = frame_to_candles(frame)
+            if len(candles) < MIN_BARS:
+                res.decision = "SKIPPED"
+                res.error = f"insufficient history ({len(candles)} < {MIN_BARS} bars)"
+                return res
 
-        if chain is None:
-            try:
-                chain = opts.fetch_chain(symbol=short)
-            except Exception as exc:
-                log.warning("%s chain unavailable: %s", short, exc)
-        if expiries is None and chain is not None:
-            expiries = list(chain.expiries)
-        if expiries is None:
-            try:
-                expiries = list(opts.fetch_expiries(symbol=short))
-            except Exception as exc:
-                log.warning("%s expiries unavailable: %s", short, exc)
+            if chain is None:
+                try:
+                    chain = opts.fetch_chain(symbol=short)
+                except Exception as exc:
+                    log.warning("%s chain unavailable: %s", short, exc)
+            if expiries is None and chain is not None:
+                expiries = list(chain.expiries)
+            if expiries is None:
+                try:
+                    expiries = list(opts.fetch_expiries(symbol=short))
+                except Exception as exc:
+                    log.warning("%s expiries unavailable: %s", short, exc)
 
         signals = collect_overnight_signals(candles, settings)
         setup = build_overnight_setup(
             candles, chain, signals=signals, settings=settings,
             events=events or None, record=False, expiry_dates=expiries,
-            underlying=short)
+            underlying=short, fut_basis_bps=basis_bps,
+            fut_oi_chg_pct=fut_oi_chg)
+    except Exception as exc:
+        log.warning("%s evaluation failed: %s", short, exc)
+        res.decision = "ERROR"
+        res.error = f"{type(exc).__name__}: {exc}"
+        return res
     except Exception as exc:
         log.warning("%s evaluation failed: %s", short, exc)
         res.decision = "ERROR"
@@ -207,14 +270,25 @@ def evaluate_stock(short: str, *, lots: int = 1,
 def evaluate_all(shorts: list[str] | None = None, *, lots: int = 1,
                  record: bool = False, journal=None,
                  events: list[str] | None = None,
-                 on_progress=None) -> list[StockOvernightResult]:
+                 on_progress=None, source: str = "yahoo") -> list[StockOvernightResult]:
     """Run every symbol; one failure never stops the batch.
 
-    One shared history bundle for all names. Chains fetch per symbol
-    (cached, sequential with the provider's own pacing). When recording,
-    symbols already journaled today are skipped (resumable evening run).
+    Yahoo path shares one history bundle for all names. Kite path shares
+    one REST client + master (per-symbol history calls inside). Chains
+    fetch per symbol (cached, sequential with the provider's own pacing).
+    When recording, symbols already journaled today are skipped (resumable
+    evening run).
     """
-    bundle = fetch_constituent_history(period=HISTORY_PERIOD)
+    rest = store = None
+    bundle = None
+    if source == "kite":
+        from data.kite import instruments as ki
+        from data.kite.rest import KiteRest
+        from data.kite.store import InstrumentStore
+        rest, store = KiteRest(), InstrumentStore()
+        ki.refresh_master(rest, store)
+    else:
+        bundle = fetch_constituent_history(period=HISTORY_PERIOD)
     if shorts is None:
         shorts = [c.short for c in get_universe()]
     recorded_today: set[str] = set()
@@ -238,22 +312,26 @@ def evaluate_all(shorts: list[str] | None = None, *, lots: int = 1,
             skipped.error = str(exc)
             out.append(skipped)
             continue
-        try:
-            chain = opts.fetch_chain(symbol=short)
-        except Exception as exc:
-            log.warning("%s chain unavailable: %s", short, exc)
-            chain = None
-        expiries: list[str] | None = None
-        if chain is not None:
-            expiries = list(chain.expiries)
+        if source == "kite":
+            chain, expiries = None, None
         else:
             try:
-                expiries = list(opts.fetch_expiries(symbol=short))
-            except Exception:
-                expiries = None
+                chain = opts.fetch_chain(symbol=short)
+            except Exception as exc:
+                log.warning("%s chain unavailable: %s", short, exc)
+                chain = None
+            expiries: list[str] | None = None
+            if chain is not None:
+                expiries = list(chain.expiries)
+            else:
+                try:
+                    expiries = list(opts.fetch_expiries(symbol=short))
+                except Exception:
+                    expiries = None
         res = evaluate_stock(short, lots=lots, bundle=bundle, chain=chain,
                              expiries=expiries, events=events,
-                             record=record, journal=journal)
+                             record=record, journal=journal,
+                             source=source, rest=rest, store=store)
         res.lot_size = res.lot_size or lot
         out.append(res)
         if on_progress:

@@ -165,7 +165,9 @@ def build_overnight_setup(candles, chain: OptionChain | None,
                           events: list[str] | None = None,
                           breadth=None, record: bool = True,
                           expiry_dates: list[str] | None = None,
-                          underlying: str = "NIFTY") -> OvernightSetup:
+                          underlying: str = "NIFTY",
+                          fut_basis_bps: float | None = None,
+                          fut_oi_chg_pct: float | None = None) -> OvernightSetup:
     """Evaluate tonight's setup through the distributional EV engine.
 
     `breadth` is an optional `BreadthSnapshot` for tonight (see
@@ -180,6 +182,7 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     `expiry_dates` (ISO dates, e.g. a stock's monthly expiries) switches
     Gate 3 and signal discipline from the NIFTY weekday heuristic to exact
     date matching. Contract sizing throughout uses `settings.lot_size`.
+    `fut_basis_bps` / `fut_oi_chg_pct` feed the ON-A / ON-D setup legs.
     """
     from analysis.signals import Direction as Dir
     from model.backtest import _base_frame
@@ -288,7 +291,8 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     os_report = build_overnight_setups_report(
         score=base.composite.score, direction=base.composite.direction,
         snap=snap_for_setups, flags=div_flags, scen=scen, vix=vix_early,
-        hist_n=setup.hist_n, events=events or [])
+        hist_n=setup.hist_n, events=events or [],
+        fut_basis_bps=fut_basis_bps, fut_oi_chg_pct=fut_oi_chg_pct)
     setup.overnight_setups = os_report
 
     # --- HARD GATES & DISTANCE-TO-GO ---------------------------------------

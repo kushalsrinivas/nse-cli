@@ -40,7 +40,8 @@ def evaluate_on_a(score: float, direction: Direction,
                   flags: list[DivergenceSignal],
                   scen: ScenarioSet | None,
                   vix: float | None,
-                  hist_n: int | None) -> OvernightSetupResult:
+                  hist_n: int | None,
+                  fut_basis_bps: float | None = None) -> OvernightSetupResult:
     """ON-A: hold the trend overnight only when the tape confirms it."""
     conds: list[SetupCondition] = [
         make_condition(
@@ -77,6 +78,11 @@ def evaluate_on_a(score: float, direction: Direction,
             scen is not None and scen.continuation_prob >= 0.28
             if scen is not None else None,
             f"P(cont)={scen.continuation_prob:.0%}" if scen is not None else ""),
+        make_condition(
+            "futures orderly (|basis|≤40bp)",
+            fut_basis_bps is not None and abs(fut_basis_bps) <= 40
+            if fut_basis_bps is not None else None,
+            f"basis {fut_basis_bps:+.0f}bp" if fut_basis_bps is not None else ""),
     ]
     fails = sum(1 for c in conds if c.status is SetupConditionStatus.FAIL)
     passes = sum(1 for c in conds if c.status is SetupConditionStatus.PASS)
@@ -218,7 +224,8 @@ def evaluate_on_c(nifty_ret: float | None,
 
 def evaluate_on_d(vix: float | None,
                   scen: ScenarioSet | None,
-                  events: list[str]) -> OvernightSetupResult:
+                  events: list[str],
+                  fut_oi_chg_pct: float | None = None) -> OvernightSetupResult:
     """ON-D: stand down on nights the gap distribution is un-modelable."""
     conds: list[SetupCondition] = [
         make_condition("no scheduled events", not events,
@@ -233,6 +240,12 @@ def evaluate_on_d(vix: float | None,
             if scen is not None else None,
             f"P(event)={scen.probs.get('E_event_vol', 0):.0%}"
             if scen is not None else ""),
+        make_condition(
+            "no futures OI shock (|ΔOI|<25%)",
+            fut_oi_chg_pct is not None and abs(fut_oi_chg_pct) < 25
+            if fut_oi_chg_pct is not None else None,
+            f"ΔOI {fut_oi_chg_pct:+.1f}%"
+            if fut_oi_chg_pct is not None else ""),
     ]
     fails = sum(1 for c in conds if c.status is SetupConditionStatus.FAIL)
     triggered = fails >= 1

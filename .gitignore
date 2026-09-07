@@ -9,5 +9,11 @@ journal.db
 *.bak
 model/learned_weights.json
 
+# Secrets — Kite credentials are env-only; no secret files in the repo
+.env
+.env.*
+*.pem
+*.key
+
 # OS
 .DS_Store

@@ -29,13 +29,16 @@ def build_overnight_setups_report(
     vix: float | None = None,
     hist_n: int | None = None,
     events: list[str] | None = None,
+    fut_basis_bps: float | None = None,
+    fut_oi_chg_pct: float | None = None,
 ) -> OvernightSetupsReport:
     flags = flags or []
     events = events or []
     nifty_ret = snap.nifty_ret_1d if snap is not None else None
     return OvernightSetupsReport(results=[
-        evaluate_on_a(score, direction, snap, flags, scen, vix, hist_n),
+        evaluate_on_a(score, direction, snap, flags, scen, vix, hist_n,
+                      fut_basis_bps),
         evaluate_on_b(snap, flags),
         evaluate_on_c(nifty_ret, snap, flags, scen, vix, events),
-        evaluate_on_d(vix, scen, events),
+        evaluate_on_d(vix, scen, events, fut_oi_chg_pct),
     ])
