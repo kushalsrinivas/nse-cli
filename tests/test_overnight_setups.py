@@ -136,13 +136,15 @@ class TestOvernightSetups(unittest.TestCase):
         self.assertEqual(rep.blockers, [])
 
     def test_view_panels(self):
+        import io
+
+        from rich.console import Console
         from rich.panel import Panel
+
         from model.overnight_setups.view import (
             render_overnight_setups,
             setups_panel,
         )
-        import io
-        from rich.console import Console
         rep = build_overnight_setups_report(
             score=72.0, direction=Direction.BULLISH, snap=snap(), flags=[],
             scen=scen(), vix=14.0, hist_n=35, events=[])

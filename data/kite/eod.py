@@ -47,7 +47,6 @@ def _frame_with_oi(records: list[dict]) -> pd.DataFrame:
     frame = _frame(records)
     if frame.empty:
         return frame
-    oi_vals: list = []
     idx = list(frame.index)
     rec_by_date = {}
     for r in records:

@@ -202,6 +202,7 @@ class TestResolvers(unittest.TestCase):
 
     def test_refresh_master(self):
         import tempfile
+
         from data.kite import instruments as ki
         from data.kite.store import InstrumentStore
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +258,7 @@ class TestRest(unittest.TestCase):
 
     def test_client_without_session(self):
         import tempfile
+
         from data.kite.auth import KiteAuthError
         from data.kite.rest import kite_client
         with tempfile.TemporaryDirectory() as tmp:

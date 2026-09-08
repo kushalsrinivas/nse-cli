@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from rich import box
 from rich.align import Align
-from rich.console import Console, Group
+from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich import box
 
 from config import SETTINGS
 from data.nifty import HistoryResult, summarize
-from data.options import ChainRow, OptionChain
+from data.options import OptionChain
 
 console = Console()
 
@@ -173,7 +173,7 @@ def options_table(chain: OptionChain, expiry: str) -> Panel:
     for row in window:
         strike_cell = Text(f"{row.strike:,.0f}")
         if abs(row.strike - spot) == min(abs(r.strike - spot) for r in window):
-            strike_cell.style = f"bold black on yellow"
+            strike_cell.style = "bold black on yellow"
 
         table.add_row(
             _leg_cell(row.call, "open_interest"),

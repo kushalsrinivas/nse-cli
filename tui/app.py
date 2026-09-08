@@ -20,9 +20,9 @@ from analysis.signals import scan_events, snapshot
 from config import SETTINGS
 from data import nifty
 from data import options as opts
-from journal.db import shared_journal
 from journal.confluence_db import shared_confluence_journal
 from journal.confluence_perf import compute_confluence_performance
+from journal.db import shared_journal
 from journal.overnight_db import shared_overnight_journal
 from journal.overnight_perf import compute_overnight_performance
 from journal.performance import all_breakdowns, summarize
@@ -176,7 +176,7 @@ class NiftyTerminal(App):
             trend = next((s for s in st.states if s.name == "Trend"), None)
             if trend:
                 style = views.DIR_STYLE[trend.direction.value]
-                status.append(f"  ·  Trend ", style="grey50").append(trend.status, style=f"bold {style}")
+                status.append("  ·  Trend ", style="grey50").append(trend.status, style=f"bold {style}")
         self.query_one("#status", Static).update(status)
         self._render_market()
         self._render_technicals()
@@ -653,6 +653,7 @@ class NiftyTerminal(App):
 
     def _open_option_trade(self, j, opt_type: str, args: list[str]) -> str:
         from datetime import datetime
+
         from model.options_scan import bs_greeks
 
         if not args:

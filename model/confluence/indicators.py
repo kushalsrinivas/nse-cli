@@ -39,10 +39,10 @@ class SwingPivot:
 def compute_cpr(prev_day: pd.DataFrame) -> CPRLevels:
     """Central Pivot Range from previous session H/L/C."""
     h = float(prev_day["high"].max())
-    l = float(prev_day["low"].min())
+    lo = float(prev_day["low"].min())
     c = float(prev_day["close"].iloc[-1])
-    pivot = (h + l + c) / 3.0
-    top = 2 * pivot - l
+    pivot = (h + lo + c) / 3.0
+    top = 2 * pivot - lo
     bottom = 2 * pivot - h
     return CPRLevels(pivot=pivot, top=top, bottom=bottom)
 

@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import pandas as pd
+from rich import box
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich import box
 
-from analysis.signals import Direction, SignalState, fmt_volume
+from analysis.signals import SignalState, fmt_volume
 from config import SETTINGS
 from data.nifty import HistoryResult, summarize
 from data.options import OptionChain
 from journal.db import Trade
 from journal.performance import Stats
-
 
 DIR_STYLE = {"bullish": "bright_green", "bearish": "bright_red", "neutral": "yellow"}
 
@@ -34,7 +33,7 @@ def _signed(v) -> str:
 def market_view(result: HistoryResult) -> list[Panel]:
     q = result.quote
     up = (q.change or 0) >= 0
-    color = GREEN = "bright_green" if up else "bright_red"
+    color = "bright_green" if up else "bright_red"
     arrow = "▲" if up else "▼"
 
     grid = Table.grid(padding=(0, 2))
@@ -140,7 +139,7 @@ def technicals_view(states: list[SignalState]) -> Panel:
 
 def signals_view(states: list[SignalState], events, limit: int = 25) -> list[Panel]:
     lines = Text()
-    for i, st in enumerate(states):
+    for st in states:
         if st.name == "Trend":
             continue
         style = DIR_STYLE[st.direction.value]

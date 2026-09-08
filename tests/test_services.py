@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -38,7 +38,7 @@ def _candles(n=260, drift=0.0012, seed=21, start=23000.0):
     return [Candle(timestamp=t.to_pydatetime(), open=float(c * 0.999),
                    high=float(c * 1.004), low=float(c * 0.996),
                    close=float(c), volume=1000000)
-            for t, c in zip(idx, close)]
+            for t, c in zip(idx, close, strict=True)]
 
 
 def _kseries(n=45, seed=5, start=23800.0):
@@ -52,7 +52,6 @@ class TestTonightService(unittest.TestCase):
     def test_run_tonight_dry(self):
         import model.overnight_card as oc
         import model.pipeline as pl
-        from services.tonight import run_tonight
         import services.bundles as bundles
 
         candles = _candles()
@@ -110,7 +109,6 @@ class TestBundles(unittest.TestCase):
         self.assertTrue(any("screen" in msg for _, msg in out.notices))
 
     def test_breadth_fetch_failure_degrades(self):
-        import data.constituents as constituents
         from services.bundles import breadth_snapshot
         with _patched("data.constituents",
                       fetch_constituent_history=_boom):
@@ -125,7 +123,6 @@ def _boom(*a, **k):
 
 class TestStockScreenService(unittest.TestCase):
     def test_passthrough(self):
-        import model.stock_overnight as so
         from services.stock_screen import run_stock_screen
         seen: dict = {}
 
@@ -156,14 +153,13 @@ class FakeRest:
     def historical(self, token, interval, frm, to, oi=False, continuous=False):
         return [{"date": t.to_pydatetime(), "open": c, "high": c * 1.001,
                  "low": c * 0.999, "close": c, "volume": 1000}
-                for t, c in zip(self.idx, self.closes)]
+                for t, c in zip(self.idx, self.closes, strict=True)]
 
     def quote(self, keys):
         return {k: {"last_price": self.quotes.get(k, 100.0)} for k in keys}
 
 
 def _temp_store(rows):
-    import tempfile
     from data.kite.store import InstrumentStore, normalize_dump_row
     tmp = tempfile.TemporaryDirectory()
     store = InstrumentStore(Path(tmp.name) / "k.db")
@@ -189,7 +185,6 @@ class TestKiteOpsService(unittest.TestCase):
                 return [dict(r, exchange=exchange or "NSE")
                         for r in _nifty_master_rows()]
 
-        import tempfile
         from data.kite.store import InstrumentStore
         with tempfile.TemporaryDirectory() as tmp:
             store = InstrumentStore(Path(tmp) / "k.db")
@@ -225,7 +220,6 @@ class TestKiteOpsService(unittest.TestCase):
             def for_expiry(self, e):
                 return [Row(23700.0), Row(23800.0), Row(23900.0)]
 
-        import tempfile
         from data.kite.store import InstrumentStore, normalize_dump_row
         with tempfile.TemporaryDirectory() as tmp:
             store = InstrumentStore(Path(tmp) / "k.db")

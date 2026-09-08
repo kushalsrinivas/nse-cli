@@ -23,10 +23,8 @@ from datetime import datetime
 import numpy as np
 
 from analysis.signals import Direction
-from config import SETTINGS
-from data.options import OptionChain, OptionLeg
+from data.options import ChainRow, OptionChain, OptionLeg
 from model.magnitude import DistributionalMove
-
 
 # ---------------------------------------------------------------------------
 # Black-Scholes Pricing & Greeks
@@ -484,7 +482,6 @@ def generate_strategy_candidates(
             l_prem = _effective_premium(l_leg, spot, l_strike, dte, is_call)
             s_prem = _effective_premium(s_leg, spot, s_strike, dte, is_call)
             net_debit = max(1.0, l_prem - s_prem)
-            spread_w = abs(s_strike - l_strike)
             spr_cost = (estimate_spread_cost(l_leg.bid, l_leg.ask, l_prem)
                         + estimate_spread_cost(s_leg.bid, s_leg.ask, s_prem))
             spr_fees = 2 * estimate_fees_per_lot(net_debit, lot_size) / lot_size
@@ -550,7 +547,6 @@ def evaluate_strategy(
     cohort_rms_sigma_pts = round(spot * (dist.raw_std_pct / 100.0), 1)
     
     vix_pts = straddle_details["vix_18h_pts"]
-    chain_pts = straddle_details["chain_18h_pts"]
     
     # Honest Volatility Edge Diagnosis (Testing within Chi-Square confidence bands)
     lower_sigma_bound = 0.83 * cohort_rms_sigma_pts
@@ -661,7 +657,6 @@ def evaluate_strategy(
     sign = 1.0 if candidate.is_call else -1.0
     trade_returns = raw_gaps * sign
     wins_mask = (pnl_arr > 0)
-    total_wins = max(1, int(wins_mask.sum()))
     
     p_profit_tail = float(((trade_returns > 1.0) & wins_mask).sum() / len(pnl_arr))
     p_profit_large = float(((trade_returns > 0.3) & (trade_returns <= 1.0) & wins_mask).sum() / len(pnl_arr))

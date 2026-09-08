@@ -135,7 +135,7 @@ class KiteWS:
                     msg = await asyncio.wait_for(ws.recv(), self.watchdog_sec)
                 except asyncio.TimeoutError:
                     raise ConnectionError(
-                        f"no WS traffic for {self.watchdog_sec:.0f}s")
+                        f"no WS traffic for {self.watchdog_sec:.0f}s") from None
                 await self._handle(msg)
 
     async def _send_intent(self) -> None:

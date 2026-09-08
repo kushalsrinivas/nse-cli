@@ -14,7 +14,7 @@ from data.options import ChainRow, OptionChain, OptionLeg
 from journal.confluence_db import ConfluenceJournal, ConfluenceRunRecord
 from journal.confluence_perf import compute_confluence_performance
 from model.confluence.chain_metrics import compute_max_pain, compute_pcr
-from model.confluence.indicators import compute_cpr, compute_orb, detect_rsi_divergence
+from model.confluence.indicators import compute_cpr, compute_orb
 from model.confluence.setups import evaluate_setup_a, evaluate_setup_b, evaluate_setup_c
 from model.confluence.types import ConditionStatus
 

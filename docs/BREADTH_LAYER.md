@@ -56,7 +56,7 @@ trade-for-trade: 65 trades, exp −0.417R, PF 0.377, DD 30.66R):
 
 - **Fetch once**: NIFTY history + chain + constituents share one bundle.
 - **Lazy breadth**: NIFTY-only screen first; the 50-ticker fetch happens
-  only if the base score clears 50 (`TONIGHT_SCREEN_SCORE`).
+  only if the base score clears 50 (`services.tonight.SCREEN_SCORE`).
 - **Dry run by default**: nothing is journaled unless `--journal` is passed
   (`build_overnight_setup(..., record=False)` also suppresses the inner
   pipeline persist — verified by test with journal sentinels).

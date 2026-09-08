@@ -66,6 +66,7 @@ class TestKiteConfig(unittest.TestCase):
 
     def test_env_read(self):
         import tempfile
+
         from data.kite.config import credentials, has_credentials, session_path
         with tempfile.TemporaryDirectory() as tmp:
             with kite_env(key="KEY1", secret="SEC1", config_dir=tmp):
@@ -85,6 +86,7 @@ class TestKiteAuth(unittest.TestCase):
 
     def test_exchange_success(self):
         import tempfile
+
         from data.kite.auth import exchange_token
         with tempfile.TemporaryDirectory() as tmp:
             with kite_env(key="K", secret="S", config_dir=tmp):
@@ -99,6 +101,7 @@ class TestKiteAuth(unittest.TestCase):
 
     def test_exchange_failure_wraps(self):
         import tempfile
+
         from data.kite.auth import KiteAuthError, exchange_token
 
         class Boom:
@@ -115,6 +118,7 @@ class TestKiteAuth(unittest.TestCase):
 
     def test_exchange_no_token_rejected(self):
         import tempfile
+
         from data.kite.auth import KiteAuthError, exchange_token
 
         class Empty:
@@ -130,8 +134,8 @@ class TestKiteAuth(unittest.TestCase):
                     exchange_token("reqtok", kite_cls=Empty)
 
     def test_save_load_roundtrip_0600(self):
-        import stat
         import tempfile
+
         from data.kite import auth
         with tempfile.TemporaryDirectory() as tmp:
             with kite_env(config_dir=tmp):
@@ -144,6 +148,7 @@ class TestKiteAuth(unittest.TestCase):
 
     def test_load_corrupt_is_none(self):
         import tempfile
+
         from data.kite import auth
         from data.kite.config import session_path
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,6 +176,7 @@ class TestKiteAuth(unittest.TestCase):
 
     def test_status_never_leaks_tokens(self):
         import tempfile
+
         from data.kite import auth
         with tempfile.TemporaryDirectory() as tmp:
             with kite_env(config_dir=tmp):
@@ -183,6 +189,7 @@ class TestKiteAuth(unittest.TestCase):
 
     def test_clear(self):
         import tempfile
+
         from data.kite import auth
         with tempfile.TemporaryDirectory() as tmp:
             with kite_env(config_dir=tmp):

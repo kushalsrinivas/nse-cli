@@ -16,11 +16,12 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from data.kite.config import config_dir, credentials, session_path
+from data.kite.config import credentials, session_path
 
 log = logging.getLogger(__name__)
 

@@ -13,8 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from analysis.signals import Direction
-
 if TYPE_CHECKING:
     from analysis.indicators import IndicatorSet
     from analysis.signals import SignalEvent
@@ -31,7 +29,7 @@ class Decision:
 class Strategy(Protocol):
     name: str
 
-    def decide(self, ind: "IndicatorSet", events: list["SignalEvent"]) -> Decision:
+    def decide(self, ind: IndicatorSet, events: list[SignalEvent]) -> Decision:
         ...
 
 
@@ -49,7 +47,7 @@ class MacdEmaConfluence:
         self.stop_pct = stop_pct
         self.target_pct = target_pct
 
-    def decide(self, ind: "IndicatorSet", events: list["SignalEvent"]) -> Decision:
+    def decide(self, ind: IndicatorSet, events: list[SignalEvent]) -> Decision:
         f = ind.frame
         if len(f) < 2:
             return Decision(None, "insufficient history")

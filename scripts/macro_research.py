@@ -8,7 +8,6 @@ Tests, over 5y of disciplined overnight signals AND all nights:
   4. straddle filter: nights AFTER big |SPX| moves — bigger NIFTY |gap|?
 """
 
-import numpy as np
 import pandas as pd
 
 from analysis.indicators import compute as ci

@@ -68,7 +68,7 @@ def _fmt(v) -> str:
 # Snapshot of the latest bar
 # ---------------------------------------------------------------------------
 
-def snapshot(ind: "IndicatorSet", settings=SETTINGS) -> list[SignalState]:
+def snapshot(ind: IndicatorSet, settings=SETTINGS) -> list[SignalState]:
     f = ind.frame
     if f.empty:
         return []
@@ -95,7 +95,7 @@ def snapshot(ind: "IndicatorSet", settings=SETTINGS) -> list[SignalState]:
     ))
 
     # --- EMA stack (fast vs mid) ---
-    e_fast, e_mid, e_slow = f"ema{settings.ema_periods[0]}", f"ema{settings.ema_periods[1]}", f"ema{settings.ema_periods[2]}"
+    e_fast, e_mid = f"ema{settings.ema_periods[0]}", f"ema{settings.ema_periods[1]}"
     cross = _cross(prev[e_mid], prev[e_fast], last[e_mid], last[e_fast])
     fast_above = last[e_fast] > last[e_mid]
     ema_dir = (Direction.BULLISH if fast_above else Direction.BEARISH)
@@ -171,7 +171,7 @@ def fmt_volume(v) -> str:
 # Historical event scan
 # ---------------------------------------------------------------------------
 
-def scan_events(ind: "IndicatorSet", settings=SETTINGS) -> list[SignalEvent]:
+def scan_events(ind: IndicatorSet, settings=SETTINGS) -> list[SignalEvent]:
     f = ind.frame
     events: list[SignalEvent] = []
     if len(f) < 2:

@@ -17,6 +17,7 @@ call/put structures; exact option P&L will differ.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 
@@ -27,13 +28,15 @@ from analysis.signals import Direction
 from config import SETTINGS
 from model.composite import MIN_TRADEABLE_CONFIDENCE, compute_composite, set_calibration
 from model.indicators import assess_all, enrich
-from model.regime import RegimeProfile, detect_regime
+from model.regime import detect_regime
 from model.weights import (
     BASELINE_WEIGHTS,
     GroupReliability,
     WeightSet,
     compute_effective_weights,
 )
+
+log = logging.getLogger(__name__)
 
 MAX_HOLD_DAYS = 10
 
@@ -258,9 +261,6 @@ def optimize_weights(candles, settings=SETTINGS, train_frac: float = 0.7,
     candles_list = list(candles)
     split = int(len(candles_list) * train_frac)
     train_c, valid_c = candles_list[:split], candles_list[split:]
-
-    train_bt = run_backtest(train_c, settings)
-    reliabilities = train_bt.group_reliabilities()
 
     current = {g: w for g, w in BASELINE_WEIGHTS.items()}
     groups = [g for g in current if g != "vwap" or True]

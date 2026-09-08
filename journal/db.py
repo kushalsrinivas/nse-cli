@@ -7,7 +7,7 @@ ISO strings (UTC-naive local market convention is fine for a journal).
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -97,7 +97,7 @@ class Trade:
         return f"{self.instrument} {self.strike:g} {self.option_type} {self.expiry}"
 
     @staticmethod
-    def compute_pnl(trade: "Trade") -> tuple[float, float] | None:
+    def compute_pnl(trade: Trade) -> tuple[float, float] | None:
         """(pnl absolute, pnl %) for a closed trade; direction-aware."""
         if trade.exit_price is None:
             return None
@@ -245,7 +245,6 @@ class Journal:
         trade = self.get(trade_id)
         if not trade or trade.status == "closed":
             return None
-        result = dict(zip(self._cols(), ([getattr(trade, c) for c in self._cols()])))
         closed = replace(
             trade,
             exit_price=float(exit_price),

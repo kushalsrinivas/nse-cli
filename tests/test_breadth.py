@@ -26,7 +26,6 @@ from model.breadth.integration import MAX_ADJUST, compute_adjustment
 from model.breadth.live import build_live_snapshot
 from model.breadth.scenarios import build_scenarios, structure_view
 from model.breadth.universe import (
-    MIN_WEIGHT_COVERAGE,
     full_weights_normalized,
     symbols,
 )
@@ -302,7 +301,7 @@ class TestAblationBacktest(unittest.TestCase):
         candles = [Candle(timestamp=t.to_pydatetime(), open=float(r["open"]),
                           high=float(r["high"]), low=float(r["low"]),
                           close=float(r["close"]), volume=int(r["volume"]))
-                   for t, (_, r) in zip(idx, nifty_df.iterrows())]
+                   for t, (_, r) in zip(idx, nifty_df.iterrows(), strict=True)]
         frames = {}
         for k, s in enumerate(symbols()):
             # constituents broadly follow NIFTY with idiosyncratic noise:
@@ -337,7 +336,7 @@ class TestTonightDryRun(unittest.TestCase):
         return [Candle(timestamp=t.to_pydatetime(), open=float(c * 0.999),
                        high=float(c * 1.004), low=float(c * 0.996),
                        close=float(c), volume=1_000_000)
-                for t, c in zip(idx, close)]
+                for t, c in zip(idx, close, strict=True)]
 
     def test_overnight_record_false_writes_nothing(self):
         import model.overnight_card as oc
@@ -367,11 +366,12 @@ class TestTonightDryRun(unittest.TestCase):
     def test_verdict_renders(self):
         import contextlib
         import io
+
         import model_cli
+        from data.constituents import ConstituentBundle
         from model.breadth.live import build_live_snapshot
         from model.overnight_card import build_overnight_setup
         from model.pipeline import evaluate
-        from data.constituents import ConstituentBundle
 
         candles = self._candles()
         idx = pd.bdate_range("2024-01-01", periods=260)
@@ -395,6 +395,7 @@ class TestTonightDryRun(unittest.TestCase):
 class TestBreadthPanels(unittest.TestCase):
     def _detail(self):
         from datetime import datetime, timedelta
+
         from data.constituents import ConstituentBundle
         from data.nifty import Candle
         from model.breadth.live import snapshot_detail
@@ -419,6 +420,7 @@ class TestBreadthPanels(unittest.TestCase):
 
     def test_panels_return_panels(self):
         from rich.panel import Panel
+
         from model.breadth.view import (
             breadth_panel,
             divergence_panel,
@@ -458,13 +460,15 @@ class TestBreadthPanels(unittest.TestCase):
 
     def test_cli_printers_run(self):
         import io
+
         from rich.console import Console
+
+        from model.breadth.scenarios import build_scenarios
         from model.breadth.view import (
             render_breadth,
             render_divergence,
             render_scenarios,
         )
-        from model.breadth.scenarios import build_scenarios
         d = self._detail()
         console = Console(file=io.StringIO(), width=100)
         render_breadth(d.snap, console)

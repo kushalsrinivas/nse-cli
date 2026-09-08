@@ -131,8 +131,8 @@ class SetupJournal:
         pnls = [r["pnl"] or 0.0 for r in rows]
         wins = [r for r in rows if r["outcome"] == "win"]
         losses = [r for r in rows if r["outcome"] == "loss"]
-        gross_win = sum(p for r, p in zip(rows, pnls) if p > 0)
-        gross_loss = abs(sum(p for r, p in zip(rows, pnls) if p < 0))
+        gross_win = sum(p for r, p in zip(rows, pnls, strict=True) if p > 0)
+        gross_loss = abs(sum(p for r, p in zip(rows, pnls, strict=True) if p < 0))
         return {
             "settled": len(rows),
             "wins": len(wins),

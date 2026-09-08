@@ -34,7 +34,6 @@ from model.backtest import (
     _simulate_outcome,
 )
 from model.breadth.aggregate import (
-    BreadthSnapshot,
     aggregate,
     aggregate_with_volumes,
 )

@@ -5,7 +5,7 @@ Offline throughout (synthetic quotes/frames, temp DBs, fake REST).
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -47,7 +47,7 @@ def _quote(ltp, oi=None, bid=None, ask=None):
 
 class TestChainBuild(unittest.TestCase):
     def test_structure_and_ivs(self):
-        from data.kite.chain import attach_ivs, build_chain
+        from data.kite.chain import build_chain
         from model.options_ev import bs_price
         spot, dte = 23800.0, 5.0
         sides = {}
@@ -70,8 +70,8 @@ class TestChainBuild(unittest.TestCase):
         self.assertIsNone(thin.rows[0].call.iv)
 
     def test_attach_ivs_pure(self):
-        from data.options import ChainRow, OptionLeg
         from data.kite.chain import attach_ivs
+        from data.options import ChainRow, OptionLeg
         from model.options_ev import bs_price
         px = bs_price(100.0, 100.0, 10.0, 0.30, True)
         row = ChainRow(strike=100.0,
@@ -104,7 +104,7 @@ def _day_records(n=300, start=100.0, drift=0.0005, seed=3, vol=5000.0, oi=None):
     close = start * np.exp(np.cumsum(rng.normal(drift, 0.008, n)))
     idx = pd.bdate_range("2024-01-01", periods=n)
     out = []
-    for i, (t, c) in enumerate(zip(idx, close)):
+    for i, (t, c) in enumerate(zip(idx, close, strict=True)):
         rec = {"date": t.to_pydatetime(), "open": c * 0.999,
                "high": c * 1.004, "low": c * 0.996, "close": c,
                "volume": vol + i}
@@ -133,8 +133,7 @@ def _store_with_nifty(tmp):
 
 class TestEodContext(unittest.TestCase):
     def test_volume_proxy_and_basis(self):
-        import tempfile
-        from data.kite.eod import constituent_frames, eod_context
+        from data.kite.eod import eod_context
         with tempfile.TemporaryDirectory() as tmp:
             store = _store_with_nifty(tmp)
             rest = FakeRest(_day_records(), _day_records(start=101.0, oi=100000))
@@ -151,7 +150,6 @@ class TestEodContext(unittest.TestCase):
             self.assertTrue(all(v >= 5000 for v in vols))
 
     def test_unknown_underlying_raises(self):
-        import tempfile
         from data.kite.eod import eod_context
         with tempfile.TemporaryDirectory() as tmp:
             store = _store_with_nifty(tmp)
@@ -162,7 +160,6 @@ class TestEodContext(unittest.TestCase):
     def test_constituent_frames_keyed_yahoo(self):
         from data.kite.eod import constituent_frames
         from data.kite.store import InstrumentStore, normalize_dump_row
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             store = InstrumentStore(Path(tmp) / "k.db")
             store.upsert([normalize_dump_row(

@@ -65,6 +65,7 @@ def main() -> int:
 
     if args.tonight:
         import types as _types
+
         import model_cli
         ns = _types.SimpleNamespace(
             period=args.period or "2y", cperiod=args.cperiod, event=args.event,
@@ -74,6 +75,7 @@ def main() -> int:
 
     if args.confluence:
         from rich.console import Console
+
         from data import options as opts
         from model.confluence.engine import build_confluence_report
         from model.confluence.view import render_confluence
@@ -94,6 +96,7 @@ def main() -> int:
 
     if args.stock_overnight:
         import types as _types
+
         import model_cli
         ns = _types.SimpleNamespace(
             symbol=args.symbol, lots=args.lots, journal=args.journal,
@@ -139,6 +142,7 @@ def main() -> int:
 
     if args.overnight_journal:
         from rich.console import Console
+
         from journal.confluence_db import shared_confluence_journal
         from journal.confluence_perf import compute_confluence_performance
         from journal.overnight_db import shared_overnight_journal
@@ -173,8 +177,9 @@ def main() -> int:
         return 0
 
     if args.classic:
+        from data import nifty
+        from data import options as opts
         from ui import terminal
-        from data import nifty, options as opts
 
         period = args.period or SETTINGS.period
         try:

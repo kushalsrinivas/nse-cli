@@ -6,10 +6,10 @@ from pathlib import Path
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import json
+import tempfile
 import unittest
 from datetime import datetime
-import tempfile
-import json
 
 from journal.overnight_db import OvernightJournal, OvernightRunRecord
 from journal.overnight_perf import compute_overnight_performance

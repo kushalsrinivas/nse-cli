@@ -30,7 +30,8 @@ def tonight_bundle(*, period: str = "2y", source: str = "yahoo") -> TonightBundl
     """NIFTY history + option chain, once, either source."""
     if (source or "yahoo") == "kite":
         return _tonight_bundle_kite()
-    from data import nifty, options as opts
+    from data import nifty
+    from data import options as opts
     bundle = TonightBundle()
     bundle.candles = nifty.fetch_history(period=period).candles
     try:
@@ -42,7 +43,6 @@ def tonight_bundle(*, period: str = "2y", source: str = "yahoo") -> TonightBundl
 
 def _tonight_bundle_kite() -> TonightBundle:
     from data.kite import instruments as ki
-    from data.kite.auth import KiteAuthError
     from data.kite.chain import KiteChainProvider
     from data.kite.eod import eod_context
     from data.kite.rest import KiteRest

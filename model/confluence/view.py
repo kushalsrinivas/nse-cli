@@ -8,7 +8,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from model.confluence.types import ConditionStatus, ConfluenceReport, ConfluenceSetupResult
+from model.confluence.types import (
+    ConditionStatus,
+    ConfluenceReport,
+    ConfluenceSetupResult,
+)
 
 
 def _setup_panel(setup: ConfluenceSetupResult) -> Panel:
@@ -45,7 +49,6 @@ def _setup_panel(setup: ConfluenceSetupResult) -> Panel:
 
     if setup.suggested:
         ch = setup.suggested
-        opt = "CE" if ch.is_call else "PE"
         body.append("")
         body.append(Text(
             f"Suggested: {ch.symbol} (Δ {ch.delta:.2f}, {ch.dte} DTE"

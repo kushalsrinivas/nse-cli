@@ -43,8 +43,6 @@ def run_parity(*, days: int = 60, all_stocks: bool = False,
     """Kite vs incumbents. Fetchers injectable (tests pass fakes)."""
     from datetime import datetime, timedelta
 
-    import pandas as pd
-
     from data.kite import instruments as ki
     from data.kite.parity import (
         CHAIN_MATCH_MIN_PCT,

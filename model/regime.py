@@ -14,7 +14,7 @@ from enum import Enum
 import pandas as pd
 
 from config import SETTINGS
-from model.indicators import adx_series, bollinger, enrich
+from model.indicators import bollinger, enrich
 
 
 class MarketRegime(str, Enum):

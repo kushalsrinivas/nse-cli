@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from data.nifty import Candle
 
 
-def to_frame(candles: list["Candle"]) -> pd.DataFrame:
+def to_frame(candles: list[Candle]) -> pd.DataFrame:
     df = pd.DataFrame(
         {
             "timestamp": [c.timestamp for c in candles],
@@ -67,7 +67,7 @@ class IndicatorSet:
         return s.iloc[-1] if len(s) else None
 
 
-def compute(candles: list["Candle"], settings=SETTINGS) -> IndicatorSet:
+def compute(candles: list[Candle], settings=SETTINGS) -> IndicatorSet:
     if not candles:
         raise ValueError("no candles supplied")
 

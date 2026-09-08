@@ -1,0 +1,39 @@
+[project]
+name = "nifty-strats"
+version = "0.1.0"
+description = "NIFTY 50 terminal trading dashboard: decision model, overnight options engine, constituent breadth, and Kite market-data service (paper trading only)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "yfinance>=1.6.0",
+    "pandas>=2.2",
+    "requests>=2.32",
+    "rich>=13.7",
+    "textual>=1.0",
+    "kiteconnect>=5.2.1",
+    "websockets>=15.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Deliberately narrow: only rules the codebase actually honors.
+# Excluded on purpose (documented, not overlooked):
+# - BLE (blind `except Exception`): the fetchers' degrade-don't-crash design.
+# - DTZ (naive datetimes): journal timestamps are local-wall by convention.
+# - S/SIM/PLR/RUF/C/ISC (style preferences): not enforced; reviewer taste.
+# - PLR0124 (`x == x`): intentional NaN guards in indicators/options.
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["analysis", "config", "data", "journal", "model",
+                     "model_cli", "scripts", "services", "strategies",
+                     "tui", "ui"]

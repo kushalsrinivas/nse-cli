@@ -19,7 +19,6 @@ are comparable across studies.
 
 from __future__ import annotations
 
-import math
 import logging
 from dataclasses import dataclass
 
@@ -105,10 +104,8 @@ def simulate(days: list[pd.DataFrame], mode: str,
         tp = (day["high"] + day["low"] + day["close"]) / 3
         vol = day["volume"].astype(float)
         vwap_series = (tp * vol).cumsum() / vol.replace(0, np.nan)
-        vwap_val = lambda ts_idx: float(vwap_series.loc[ts_idx])
 
         crossed_up = crossed_dn = False
-        j = 0
         rows = day.iterrows()
         while True:
             try:
@@ -155,7 +152,7 @@ def simulate(days: list[pd.DataFrame], mode: str,
                 stop = level * (1 + stop_buffer_pct) if side == "PE" \
                     else level * (1 - stop_buffer_pct)
                 risk = abs(entry - stop)
-                vw = vwap_val(ts)
+                vw = float(vwap_series.loc[ts])
                 target = vw if sign * (vw - entry) > 0 else entry + sign * risk * rr_target
 
             # ---- manage until exit ---------------------------------------

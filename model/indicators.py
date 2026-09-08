@@ -89,10 +89,10 @@ def adx_series(frame: pd.DataFrame, period: int = SETTINGS.adx_period) -> pd.Ser
     up = frame["high"].diff()
     down = -frame["low"].diff()
     plus_dm = pd.Series(
-        [u if (u > d and u > 0) else 0.0 for u, d in zip(up, down)], index=frame.index
+        [u if (u > d and u > 0) else 0.0 for u, d in zip(up, down, strict=True)], index=frame.index
     )
     minus_dm = pd.Series(
-        [d if (d > u and d > 0) else 0.0 for u, d in zip(up, down)], index=frame.index
+        [d if (d > u and d > 0) else 0.0 for u, d in zip(up, down, strict=True)], index=frame.index
     )
     tr = pd.concat([
         frame["high"] - frame["low"],
@@ -188,7 +188,7 @@ def assess_ema_stack(f: pd.DataFrame) -> IndicatorAssessment:
     else:
         confidence = _clamp(confidence * 0.8)  # tangled stack
     return IndicatorAssessment(
-        name=f"EMA 9/21/50", group="trend", direction=direction, confidence=confidence,
+        name="EMA 9/21/50", group="trend", direction=direction, confidence=confidence,
         detail={"stacked": bool(fully_bull or fully_bear),
                 "spread_pct": round(spread, 3)},
     )

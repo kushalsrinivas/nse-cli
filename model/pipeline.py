@@ -16,8 +16,14 @@ from dataclasses import dataclass, field, replace
 from analysis.indicators import compute as compute_indicators
 from analysis.signals import Direction
 from config import SETTINGS
-from data import nifty, options as opts
-from model.composite import CompositeResult, MIN_TRADEABLE_CONFIDENCE, compute_composite, grade_for
+from data import nifty
+from data import options as opts
+from model.composite import (
+    MIN_TRADEABLE_CONFIDENCE,
+    CompositeResult,
+    compute_composite,
+    grade_for,
+)
 from model.indicators import IndicatorAssessment, assess_all
 from model.journal import SetupJournal, SetupRecord, now_iso
 from model.options_scan import OptionCandidate, scan_candidates

@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from journal.confluence_db import ConfluenceJournal, ConfluenceRunRecord, shared_confluence_journal
+from journal.confluence_db import (
+    ConfluenceJournal,
+    ConfluenceRunRecord,
+    shared_confluence_journal,
+)
 
 
 @dataclass(frozen=True)

@@ -23,7 +23,6 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from config import SETTINGS
 from data.cache import shared_cache
 
 log = logging.getLogger(__name__)

@@ -26,7 +26,8 @@ console = Console()
 
 
 def cmd_evaluate(args) -> int:
-    from data import nifty, options as opts
+    from data import nifty
+    from data import options as opts
     from model.pipeline import evaluate
     from model.scorecard import render_candidates, render_setup
 
@@ -112,8 +113,9 @@ def cmd_optimize(args) -> int:
 
 
 def cmd_journal(args) -> int:
-    from model.journal import SetupJournal
     from rich.text import Text
+
+    from model.journal import SetupJournal
 
     j = SetupJournal()
 
@@ -170,7 +172,8 @@ def cmd_journal(args) -> int:
 
 def cmd_overnight(args) -> int:
     """Tonight's GO/NO-GO card for the buy-at-close overnight play."""
-    from data import nifty, options as opts
+    from data import nifty
+    from data import options as opts
     from model.macro import live_snapshot
     from model.overnight import collect_overnight_signals
     from model.overnight_card import build_overnight_setup
@@ -463,8 +466,8 @@ def cmd_kite_live(args) -> int:
         dec = sum(1 for r in rows if r[1] < -0.05)
         total_v = adv_vol + dec_vol
         now = datetime.now(tz=IST).strftime("%H:%M:%S")
-        top = ", ".join(s + " " + ("%+.2f%%" % c) for s, c, _ in rows[:5])
-        bot = ", ".join(s + " " + ("%+.2f%%" % c) for s, c, _ in rows[-5:])
+        top = ", ".join(s + " " + f"{c:+.2f}%" for s, c, _ in rows[:5])
+        bot = ", ".join(s + " " + f"{c:+.2f}%" for s, c, _ in rows[-5:])
         if total_v:
             console.print("[bold]" + now + "[/] adv " + str(adv) + " / dec " +
                           str(dec) + " / flat " + str(len(rows) - adv - dec) +
@@ -514,6 +517,7 @@ def _eod_flush(candles, tokens: list[int], date: str | None = None) -> None:
     """Build the day's 1d candle per token from stored 1m rows."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     from data.kite.candles import DayCandle
     today = date or datetime.now(tz=ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
     days = []
@@ -782,9 +786,12 @@ def cmd_breadth_backtest(args) -> int:
 def cmd_research(args) -> int:
     """Historical research: what follows qualifying closes?"""
     from data import nifty
-    from model.overnight import (
-        collect_overnight_signals, format_research, premium_outlook)
     from model.backtest import _base_frame
+    from model.overnight import (
+        collect_overnight_signals,
+        format_research,
+        premium_outlook,
+    )
 
     result = nifty.fetch_history(period=args.period)
     console.print(f"replaying {len(result.candles)} bars ...")

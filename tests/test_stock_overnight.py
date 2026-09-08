@@ -21,7 +21,7 @@ from analysis.signals import Direction
 
 class TestEquityLots(unittest.TestCase):
     def test_universe_fully_covered(self):
-        from data.equity_lots import LOTS, lot_for
+        from data.equity_lots import lot_for
         from model.breadth.universe import get_universe
         shorts = [c.short for c in get_universe()]
         self.assertEqual(len(shorts), 50)
@@ -97,7 +97,7 @@ def _trend_frame(n=260, drift=0.0015, seed=9, start=500.0):
 def _chain(spot=560.0, expiry="2026-09-24"):
     from data.options import ChainRow, OptionChain, OptionLeg
     rows = []
-    for k, strike in enumerate([s for s in np.arange(520, 605, 5)]):
+    for strike in np.arange(520, 605, 5):
         dist = abs(strike - spot) / spot
         row = ChainRow(
             strike=float(strike),
@@ -120,7 +120,6 @@ class TestStockRunner(unittest.TestCase):
         self.assertIn("no lot size", r.error)
 
     def test_short_history_skips(self):
-        import tempfile
         from data.constituents import ConstituentBundle
         from model.stock_overnight import evaluate_stock
         frame = _trend_frame(n=60)
@@ -153,6 +152,7 @@ class TestStockRunner(unittest.TestCase):
 class TestStockJournal(unittest.TestCase):
     def setUp(self):
         import tempfile
+
         from journal.stock_overnight_db import StockOvernightJournal
         self.tmp = tempfile.TemporaryDirectory()
         self.j = StockOvernightJournal(Path(self.tmp.name) / "t.db")

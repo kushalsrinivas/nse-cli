@@ -10,6 +10,7 @@ from data.options import OptionChain
 from model.confluence.chain_metrics import build_chain_snapshot, pick_strike
 from model.confluence.indicators import (
     ORBRange,
+    avg_first_30min_volume,
     compute_cpr,
     compute_orb,
     detect_rsi_divergence,
@@ -20,7 +21,6 @@ from model.confluence.indicators import (
     macd_histogram_expanding_positive,
     macd_histogram_shrinking_against_trend,
     orb_breakout_direction,
-    avg_first_30min_volume,
     resample_bars,
     reversal_past_pivot,
 )

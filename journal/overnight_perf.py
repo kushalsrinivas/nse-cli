@@ -11,9 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
-
-from journal.overnight_db import OvernightJournal, OvernightRunRecord, shared_overnight_journal
+from journal.overnight_db import (
+    OvernightJournal,
+    OvernightRunRecord,
+    shared_overnight_journal,
+)
 
 
 @dataclass(frozen=True)

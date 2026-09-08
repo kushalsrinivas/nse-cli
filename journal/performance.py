@@ -7,7 +7,7 @@ breakdowns by strategy, direction, calendar period, and indicator setup.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 from journal.db import Trade
@@ -78,9 +78,11 @@ def summarize(trades: list[Trade]) -> Stats:
     streak_w = streak_l = 0
     for p in pnls:
         if p > 0:
-            streak_w += 1; streak_l = 0
+            streak_w += 1
+            streak_l = 0
         elif p < 0:
-            streak_l += 1; streak_w = 0
+            streak_l += 1
+            streak_w = 0
         s.max_consec_wins = max(s.max_consec_wins, streak_w)
         s.max_consec_losses = max(s.max_consec_losses, streak_l)
 

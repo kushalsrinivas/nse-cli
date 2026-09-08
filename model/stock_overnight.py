@@ -196,11 +196,6 @@ def evaluate_stock(short: str, *, lots: int = 1,
         res.decision = "ERROR"
         res.error = f"{type(exc).__name__}: {exc}"
         return res
-    except Exception as exc:
-        log.warning("%s evaluation failed: %s", short, exc)
-        res.decision = "ERROR"
-        res.error = f"{type(exc).__name__}: {exc}"
-        return res
 
     res.spot = setup.spot
     res.direction = setup.composite.direction.value

@@ -7,10 +7,9 @@ hypothetical outcomes, and settlement tracking.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import uuid
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any

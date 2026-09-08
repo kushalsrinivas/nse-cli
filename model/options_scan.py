@@ -19,7 +19,6 @@ from analysis.signals import Direction
 from config import SETTINGS
 from data.options import OptionChain, OptionLeg
 
-
 # ---------------------------------------------------------------------------
 # Black-Scholes pricing + greeks (r, q kept simple for NIFTY index)
 # ---------------------------------------------------------------------------
@@ -113,7 +112,6 @@ def _score_candidate(leg: OptionLeg, is_call: bool, spot: float,
     dte = days_to_expiry(leg.expiry)
     greeks = bs_greeks(spot, leg.strike, dte, (leg.iv or 15.0) / 100.0, is_call)
     delta = abs(greeks["delta"])
-    dist = abs(leg.strike - spot) / spot * 100
 
     # --- Moneyness sweet spot: delta 0.35-0.60 ---
     if 0.40 <= delta <= 0.58:
@@ -214,15 +212,14 @@ def scan_candidates(chain: OptionChain, direction: Direction,
 
     is_call = direction is Direction.BULLISH
     legs = [(r.strike, r.call if is_call else r.put) for r in rows]
-    legs = [(s, l) for s, l in legs if l.ltp and l.ltp > 0.05]
+    legs = [(s, leg) for s, leg in legs if leg.ltp and leg.ltp > 0.05]
 
-    ivs = [l.iv for _, l in legs if l.iv and l.iv > 0]
+    ivs = [leg.iv for _, leg in legs if leg.iv and leg.iv > 0]
     iv_median = sorted(ivs)[len(ivs) // 2] if ivs else 15.0
 
     # Expected daily move ~ 1σ from ATM IV.
     atm_leg = min(legs, key=lambda sl: abs(sl[0] - spot))[1]
     atm_iv = (atm_leg.iv or iv_median) / 100.0
-    dte_ref = max(days_to_expiry(atm_leg.expiry), 1)
     expected_move_pct = spot * atm_iv / math.sqrt(252) / spot * 100 * math.sqrt(252 / 252)
 
     scored: list[OptionCandidate] = []

@@ -20,21 +20,21 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+
 import numpy as np
 import pandas as pd
 
 from analysis.signals import Direction
 from config import SETTINGS
 from data.options import OptionChain
-from model.composite import CompositeResult, MIN_TRADEABLE_CONFIDENCE
+from model.composite import MIN_TRADEABLE_CONFIDENCE, CompositeResult
 from model.indicators import IndicatorAssessment
+from model.journal import SetupJournal, SetupRecord, now_iso
 from model.magnitude import DistributionalMove, compute_distribution
 from model.options_ev import (
-    StrategyCandidate,
     StrategyEV,
     generate_strategy_candidates,
     rank_and_select_best_strategy,
-    wilson_score_interval,
 )
 from model.regime import RegimeProfile
 from model.risk import RiskManager, SizingResult
@@ -186,7 +186,6 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     """
     from analysis.signals import Direction as Dir
     from model.backtest import _base_frame
-    from model.journal import SetupJournal, SetupRecord, now_iso
     from model.macro import fetch_macro_history
     from model.overnight import (
         _expiry_weekday,

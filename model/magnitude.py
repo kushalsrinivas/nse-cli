@@ -14,6 +14,7 @@ Explicitly models both:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
 import numpy as np
 
 from analysis.signals import Direction

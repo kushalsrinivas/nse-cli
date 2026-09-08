@@ -22,7 +22,6 @@ from rich.table import Table
 from data import nifty
 from model.magnitude import compute_distribution
 from model.options_ev import (
-    bs_greeks,
     bs_price,
     estimate_fees_per_lot,
     estimate_spread_cost,
@@ -85,7 +84,6 @@ def simulate_strategy_over_signals(signals: list, strat_type: str, dte: int = 7)
         is_call = (s.direction.value == "bullish")
         spot_entry = s.entry_close
         spot_exit = s.next_open
-        ds = spot_exit - spot_entry
 
         weekday = s.timestamp.weekday() if hasattr(s.timestamp, "weekday") else 0
         div = estimate_expected_iv_change(weekday, dte, s.regime)
