@@ -84,7 +84,7 @@ def main() -> int:
             console.print(f"[yellow]option chain unavailable: {exc}[/]")
         report = build_confluence_report(
             chain=chain, events=args.event or None,
-            journal=None if args.journal else False)
+            journal=True if args.journal else False)
         render_confluence(report, console)
         if not args.journal:
             console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")

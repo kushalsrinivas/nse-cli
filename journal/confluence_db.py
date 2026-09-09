@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS confluence_trade_journal (
     hypothetical_pnl_pct REAL,
     outcome TEXT NOT NULL DEFAULT 'PENDING' CHECK(outcome IN ('WIN', 'LOSS', 'BREAKEVEN', 'NOT_TRADED', 'PENDING')),
     is_actual_trade INTEGER NOT NULL DEFAULT 0,
+    lots INTEGER NOT NULL DEFAULT 0,
     conditions_json TEXT DEFAULT '[]',
     blocked_reasons TEXT DEFAULT '',
     decision_rationale TEXT DEFAULT '',
@@ -49,6 +50,10 @@ CREATE INDEX IF NOT EXISTS idx_cj_decision ON confluence_trade_journal(decision)
 CREATE INDEX IF NOT EXISTS idx_cj_trade_date ON confluence_trade_journal(trade_date);
 CREATE INDEX IF NOT EXISTS idx_cj_run_id ON confluence_trade_journal(run_id);
 """
+
+_MIGRATIONS = (
+    ("lots", "INTEGER DEFAULT 0"),
+)
 
 
 @dataclass
@@ -76,6 +81,7 @@ class ConfluenceRunRecord:
     hypothetical_pnl_pct: float | None = None
     outcome: str = "PENDING"
     is_actual_trade: int = 0
+    lots: int = 0
     conditions_json: str = "[]"
     blocked_reasons: str = ""
     decision_rationale: str = ""
@@ -111,6 +117,17 @@ class ConfluenceJournal:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add post-v1 columns to databases created before them."""
+        existing = {r["name"] for r in
+                    self.conn.execute("PRAGMA table_info(confluence_trade_journal)")}
+        for col, decl in _MIGRATIONS:
+            if col not in existing:
+                self.conn.execute(
+                    f"ALTER TABLE confluence_trade_journal ADD COLUMN {col} {decl}")
+        self.conn.commit()
 
     def _to_record(self, row: sqlite3.Row) -> ConfluenceRunRecord:
         data = {f.name: row[f.name] for f in fields(ConfluenceRunRecord) if f.name in row.keys()}
@@ -194,6 +211,22 @@ class ConfluenceJournal:
         params.append(limit)
         return [self._to_record(r) for r in self.conn.execute(sql, params)]
 
+    def mark_traded(self, record_id: int, lots: int = 1) -> ConfluenceRunRecord | None:
+        """Mark a recorded run as actually taken (GO never implies traded).
+
+        Lots default to 1 and must be a positive integer; stored for
+        lots-aware settlement.
+        """
+        rec = self.get(record_id)
+        if not rec:
+            return None
+        if not isinstance(lots, int) or isinstance(lots, bool) or lots < 1:
+            raise ValueError(f"lots must be a positive integer, got {lots!r}")
+        rec.is_actual_trade = 1
+        rec.lots = lots
+        self.update(rec)
+        return rec
+
     def settle(
         self,
         record_id: int,
@@ -207,7 +240,7 @@ class ConfluenceJournal:
 
         actual_flag = rec.is_actual_trade if is_actual is None else (1 if is_actual else 0)
         entry = rec.entry_price
-        lot_qty = 75
+        lot_qty = (rec.lots or 1) * 75
         price_diff = exit_price - entry
         pnl = price_diff * lot_qty
         pnl_pct = (price_diff / entry) * 100.0 if entry > 0 else 0.0

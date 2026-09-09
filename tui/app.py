@@ -68,6 +68,7 @@ class NiftyTerminal(App):
         Binding("6", "tab('performance')", "Performance", show=False),
         Binding("7", "tab('overnight')", "Overnight", show=False),
         Binding("8", "tab('breadth')", "Breadth", show=False),
+        Binding("9", "tab('intraday')", "Intraday", show=False),
         Binding("r", "force_refresh", "Refresh"),
         Binding("e", "next_expiry", "Expiry"),
         Binding("b", "refresh_breadth", "Breadth"),
@@ -84,6 +85,7 @@ class NiftyTerminal(App):
         self.oj_search: str | None = None
         self.cf_filter = "all"
         self.cf_search: str | None = None
+        self.cf_last_report = None
 
     # -- layout -------------------------------------------------------------
 
@@ -96,12 +98,15 @@ class NiftyTerminal(App):
                 ("options", "3 Options"), ("signals", "4 Signals"),
                 ("journal", "5 Journal"), ("performance", "6 Performance"),
                 ("overnight", "7 Overnight"), ("breadth", "8 Breadth"),
+                ("intraday", "9 Intraday"),
             ):
                 with TabPane(title=title, id=tab_id):
                     if tab_id == "journal":
                         yield Input(placeholder=views.JOURNAL_HELP.replace("[bold]", "").replace("[/bold]", ""), id="journal-input")
                     elif tab_id == "overnight":
                         yield Input(placeholder=views.OVERNIGHT_JOURNAL_HELP.replace("[bold]", "").replace("[/bold]", ""), id="overnight-input")
+                    elif tab_id == "intraday":
+                        yield Input(placeholder=views.INTRADAY_HELP.replace("[bold]", "").replace("[/bold]", ""), id="intraday-input")
                     yield VerticalScroll(Static("", classes="panel-holder"), id=f"scroll-{tab_id}")
         yield Footer()
 
@@ -186,11 +191,11 @@ class NiftyTerminal(App):
         self._render_performance()
         self._render_overnight_journal()
         self._render_breadth()
+        self._render_intraday()
 
     def _render_overnight_journal(self) -> None:
         holder = self._holder("overnight")
         oj = shared_overnight_journal()
-        cj = shared_confluence_journal()
 
         decision_filter = "all"
         trade_type = "all"
@@ -221,10 +226,22 @@ class NiftyTerminal(App):
             f"[bold]OVERNIGHT TRADE JOURNAL[/bold] — filter={self.oj_filter}"
             f"{' search=' + repr(self.oj_search) if self.oj_search else ''} · {len(records)} runs"
         )
-        parts = [
-            views.overnight_performance_panel(perf),
-            views.overnight_journal_table(records, title=title),
-        ]
+        self._set(holder,
+                  views.overnight_performance_panel(perf),
+                  views.overnight_journal_table(records, title=title))
+
+    def _render_intraday(self) -> None:
+        from model.confluence.view import confluence_panel
+        holder = self._holder("intraday")
+        cj = shared_confluence_journal()
+
+        parts: list = []
+        if self.cf_last_report is not None:
+            parts.append(confluence_panel(self.cf_last_report))
+        else:
+            parts.append(Panel(
+                Text("No live evaluation yet — type run to evaluate A/B/C now.",
+                     style="yellow"), box=box.ROUNDED))
 
         setup_map = {"setup-a": "A", "setup-b": "B", "setup-c": "C"}
         cf_setup = setup_map.get(self.cf_filter, "all")
@@ -474,6 +491,16 @@ class NiftyTerminal(App):
             nret_bit = f"{nret:+.2f}%" if nret is not None else "n/a"
             text = f"{d.snap.date} NIFTY {nret_bit} | " \
                 + tape_summary(d.snap, d.flags)
+        elif tab == "intraday":
+            rep = self.cf_last_report
+            if rep is not None and getattr(rep, "setups", None):
+                text = "confluence " + " · ".join(
+                    f"{s.setup_id}={s.decision}" for s in rep.setups)
+            else:
+                cj = shared_confluence_journal()
+                latest = cj.list(limit=1)
+                text = ("confluence latest: #" + str(latest[0].id) + " Setup " +
+                        latest[0].setup_id + " " + latest[0].decision) if latest else ""
         elif not text:
             hist = self.state.history
             if hist:
@@ -515,17 +542,23 @@ class NiftyTerminal(App):
                     pass
                 self.notify(feedback, severity="information", timeout=6)
             self._render_overnight_journal()
+        elif event.input.id == "intraday-input":
+            feedback = self._run_intraday_command(raw)
+            if feedback:
+                try:
+                    self.copy_to_clipboard(feedback)
+                    feedback += "   [copied to clipboard]"
+                except Exception:
+                    pass
+                self.notify(feedback, severity="information", timeout=6)
+            self._render_intraday()
 
     def _run_overnight_journal_command(self, raw: str) -> str | None:
         oj = shared_overnight_journal()
-        cj = shared_confluence_journal()
         parts = shlex.split(raw)
         cmd, args = parts[0].lower(), parts[1:]
         if cmd == "oj" and args:
             cmd, args = args[0].lower(), args[1:]
-
-        if cmd == "cf" and args:
-            return self._run_confluence_command(args, cj)
 
         try:
             match cmd:
@@ -547,16 +580,13 @@ class NiftyTerminal(App):
                         return f"settled #{rec_id} ({rec.contract_name}) @ ₹{exit_p:.2f} → P&L {rec.pnl_display} ({rec.outcome})"
                     return f"record #{rec_id} not found"
                 case "run":
-                    from model.confluence.engine import build_confluence_report
                     from model.overnight_card import build_overnight_setup
                     candles = self.state.history.candles if self.state.history else []
                     if not candles:
                         return "no market history loaded"
                     setup = build_overnight_setup(candles, self.state.chain)
-                    cf = build_confluence_report(chain=self.state.chain)
-                    cf_verdicts = " · ".join(f"{s.setup_id}={s.decision}" for s in cf.setups)
                     return (f"overnight → {setup.verdict} ({setup.composite.direction.value.upper()}, "
-                            f"score {setup.composite.score:.0f}) | confluence: {cf_verdicts or cf.error or 'n/a'}")
+                            f"score {setup.composite.score:.0f})")
                 case "show":
                     if not args:
                         return "usage: show <id>"
@@ -570,6 +600,52 @@ class NiftyTerminal(App):
                     return f"unknown overnight command {cmd!r} — try help"
         except (IndexError, ValueError) as exc:
             return f"bad overnight command: {exc}"
+
+    def _run_intraday_command(self, raw: str) -> str | None:
+        from model.confluence.engine import build_confluence_report
+        cj = shared_confluence_journal()
+        parts = shlex.split(raw)
+        cmd, args = parts[0].lower(), parts[1:]
+        if cmd == "cf" and args:
+            cmd, args = args[0].lower(), args[1:]
+
+        if cmd == "trade":
+            if not args:
+                return "usage: trade <id> [lots]"
+            try:
+                lots = int(args[1]) if len(args) > 1 else 1
+                rec = cj.mark_traded(int(args[0]), lots)
+            except ValueError as exc:
+                return f"bad trade command: {exc}"
+            if not rec:
+                return f"confluence record #{args[0]} not found"
+            return (f"marked #{rec.id} Setup {rec.setup_id} as TRADED "
+                    f"({rec.lots} lot(s)) — settle with cf settle when done")
+
+        if cmd == "run":
+            try:
+                report = build_confluence_report(chain=self.state.chain, journal=True)
+            except Exception as exc:
+                return f"evaluation failed: {exc}"
+            self.cf_last_report = report
+            verdicts = " · ".join(f"{s.setup_id}={s.decision}" for s in report.setups)
+            return (f"recorded run {report.run_id} → {verdicts or report.error or 'n/a'} "
+                    f"(hypothetical until marked with trade)")
+
+        if cmd == "eval":
+            try:
+                report = build_confluence_report(chain=self.state.chain,
+                                                 journal=False)
+            except Exception as exc:
+                return f"evaluation failed: {exc}"
+            self.cf_last_report = report
+            verdicts = " · ".join(f"{s.setup_id}={s.decision}" for s in report.setups)
+            return f"evaluated (not recorded) → {verdicts or report.error or 'n/a'}"
+
+        if cmd == "help":
+            return views.INTRADAY_HELP
+
+        return self._run_confluence_command([cmd, *args], cj)
 
     def _run_confluence_command(self, args: list[str], cj) -> str | None:
         if not args:

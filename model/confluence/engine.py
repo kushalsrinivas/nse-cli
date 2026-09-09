@@ -27,10 +27,16 @@ def _vix_from_snapshot() -> tuple[float | None, float | None]:
 def build_confluence_report(
     chain: OptionChain | None = None,
     events: list[str] | None = None,
-    journal=None,
+    journal=False,
     now: datetime | None = None,
 ) -> ConfluenceReport:
-    """Evaluate Setups A/B/C on live 5m data and optionally journal."""
+    """Evaluate Setups A/B/C on live 5m data.
+
+    Dry-run by default (`journal=False`): evaluation never writes.
+    Pass `journal=True` (shared journal) or a ConfluenceJournal to record
+    the run. Recorded runs are always hypothetical (`is_actual_trade=0`);
+    use `ConfluenceJournal.mark_traded()` when a human actually takes one.
+    """
     now = now or datetime.now()
     run_id = f"CF-{now.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
     ts = now.isoformat(timespec="seconds")
@@ -79,7 +85,9 @@ def _record(report: ConfluenceReport, journal=None) -> None:
         return
     from journal.confluence_db import ConfluenceRunRecord, shared_confluence_journal
 
-    cj = journal or shared_confluence_journal()
+    cj = shared_confluence_journal() if journal is True else journal
+    if cj is None:
+        return
     import json
 
     for s in report.setups:
@@ -100,7 +108,7 @@ def _record(report: ConfluenceReport, journal=None) -> None:
             expiry=ch.expiry if ch else "",
             entry_price=ch.entry_price if ch else None,
             delta=ch.delta if ch else None,
-            is_actual_trade=1 if s.go else 0,
+            is_actual_trade=0,
             conditions_json=json.dumps([
                 {"name": c.name, "status": c.status.value, "detail": c.detail}
                 for c in s.conditions

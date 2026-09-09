@@ -383,9 +383,16 @@ def overnight_performance_panel(summary) -> Panel:
 OVERNIGHT_JOURNAL_HELP = (
     "[bold]oj filter[/bold] all|go|no-go|actual|hypo|ce|pe · "
     "[bold]oj settle[/bold] <id> <exit_price> · "
-    "[bold]oj search[/bold] <text> · [bold]oj show[/bold] <id> · [bold]oj run[/bold] · "
-    "[bold]oj cf filter[/bold] all|setup-a|setup-b|setup-c|go|no-go · "
-    "[bold]oj cf settle[/bold] <id> <exit_price>"
+    "[bold]oj search[/bold] <text> · [bold]oj show[/bold] <id> · [bold]oj run[/bold]"
+)
+
+
+INTRADAY_HELP = (
+    "[bold]run[/bold] evaluate A/B/C now + record the run · "
+    "[bold]cf filter[/bold] all|setup-a|setup-b|setup-c|go|no-go · "
+    "[bold]cf settle[/bold] <id> <exit_price> · "
+    "[bold]trade[/bold] <id> [lots] · "
+    "[bold]cf show[/bold] <id> · [bold]cf search[/bold] <text>"
 )
 
 
