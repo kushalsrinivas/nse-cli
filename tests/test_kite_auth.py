@@ -183,14 +183,19 @@ class TestKiteAuth(unittest.TestCase):
         self.assertEqual(exp.tzinfo, IST)
 
     def test_validity_windows(self):
+        import tempfile
+
         from data.kite import auth
         s = {"access_token": "t", "login_time": "2026-09-06 10:00:00"}
         self.assertTrue(auth.session_valid(
             s, datetime(2026, 9, 6, 12, 0, tzinfo=IST)))
         self.assertFalse(auth.session_valid(
             s, datetime(2026, 9, 7, 7, 0, tzinfo=IST)))
-        self.assertFalse(auth.session_valid(None))
-        self.assertFalse(auth.session_valid({}))
+        # None/empty must not fall through to any real stored session.
+        with tempfile.TemporaryDirectory() as tmp:
+            with kite_env(config_dir=tmp):
+                self.assertFalse(auth.session_valid(None))
+                self.assertFalse(auth.session_valid({}))
 
     def test_status_never_leaks_tokens(self):
         import tempfile
