@@ -116,6 +116,24 @@ class TestKiteAuth(unittest.TestCase):
                 with self.assertRaises(KiteAuthError):
                     exchange_token("reqtok", kite_cls=Boom)
 
+    def test_not_enabled_maps_to_actionable_error(self):
+        import tempfile
+
+        from data.kite.auth import KiteAuthError, exchange_token
+
+        class NotEnabled:
+            def __init__(self, api_key):
+                pass
+
+            def generate_session(self, request_token, api_secret):
+                raise Exception("The user is not enabled for the app.")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with kite_env(config_dir=tmp):
+                with self.assertRaises(KiteAuthError) as ctx:
+                    exchange_token("reqtok", kite_cls=NotEnabled)
+                self.assertIn("same client ID", str(ctx.exception))
+
     def test_exchange_no_token_rejected(self):
         import tempfile
 

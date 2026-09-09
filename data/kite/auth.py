@@ -57,7 +57,22 @@ def exchange_token(request_token: str, kite_cls=None) -> dict:
         client = kite_cls(api_key=creds.api_key)
         session = client.generate_session(request_token, creds.api_secret)
     except Exception as exc:
-        raise KiteAuthError(f"token exchange failed: {type(exc).__name__}") from exc
+        name = type(exc).__name__
+        if "not enabled" in str(exc).lower():
+            raise KiteAuthError(
+                "Zerodha refused the login: a Connect app only works with "
+                "the same client ID it was created with. Fix: open the app "
+                "details screen on developers.kite.trade and check the "
+                "Client ID field matches your Zerodha login exactly (no "
+                "leading/trailing spaces), log out of any other Zerodha "
+                "account in this browser, then log in again for a fresh "
+                "request_token.") from exc
+        if "token" in name.lower():
+            raise KiteAuthError(
+                "request_token is expired or already used (single-use, "
+                "minutes lifetime) — log in again for a fresh one and "
+                "exchange it immediately.") from exc
+        raise KiteAuthError(f"token exchange failed: {name}") from exc
     if not isinstance(session, dict) or not session.get("access_token"):
         raise KiteAuthError("token exchange returned no access_token")
     return session
@@ -67,10 +82,14 @@ def save_session(session: dict) -> Path:
     """Persist the session (0600, atomic). Returns the path."""
     path = session_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    serializable = {
+        k: (v.strftime("%Y-%m-%d %H:%M:%S") if isinstance(v, datetime) else v)
+        for k, v in session.items()
+    }
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
-            json.dump(session, fh)
+            json.dump(serializable, fh)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     finally:

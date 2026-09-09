@@ -96,7 +96,8 @@ class TickAggregator:
             self.counters["no_ltp"] += 1
             return
         token = tick["token"]
-        key = (token, tick.get("exchange_ts"), ltp, tick.get("volume"))
+        key = (token, tick.get("exchange_ts"), ltp, tick.get("volume"),
+               tick.get("oi"))
         if self._last_key.get(token) == key:
             self.counters["duplicates"] += 1
             return

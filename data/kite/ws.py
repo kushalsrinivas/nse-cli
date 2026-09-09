@@ -85,6 +85,8 @@ class KiteWS:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if self._stop.is_set():
+                    break  # we initiated the close; not an error
                 self.counters["errors"] += 1
                 log.warning("kite ws error (%s); reconnecting", exc)
             if self._stop.is_set():
