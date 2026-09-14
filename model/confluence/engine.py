@@ -15,6 +15,13 @@ from model.macro import live_snapshot
 
 
 def _vix_from_snapshot() -> tuple[float | None, float | None]:
+    try:
+        from data import source
+        level, change = source.get_india_vix()
+        if level:
+            return level, change
+    except Exception:
+        pass
     snap = live_snapshot()
     if not snap:
         return None, None
@@ -27,17 +34,30 @@ def _vix_from_snapshot() -> tuple[float | None, float | None]:
 def build_confluence_report(
     chain: OptionChain | None = None,
     events: list[str] | None = None,
-    journal=None,
+    journal=False,
     now: datetime | None = None,
+    timeframe: str = "5m",
+    df_5m: pd.DataFrame | None = None,
+    use_cache: bool = True,
 ) -> ConfluenceReport:
-    """Evaluate Setups A/B/C on live 5m data and optionally journal."""
+    """Evaluate Setups A/B/C on live 5m data.
+
+    Dry-run by default (`journal=False`): evaluation never writes.
+    Pass `journal=True` (shared journal) or a ConfluenceJournal to record
+    the run. Recorded runs are always hypothetical (`is_actual_trade=0`);
+    use `ConfluenceJournal.mark_traded()` when a human actually takes one.
+    Pass `df_5m` to inject a pre-fetched frame (live loops); otherwise the
+    frame is fetched here (set `use_cache=False` to force fresh bars).
+    """
     now = now or datetime.now()
     run_id = f"CF-{now.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4].upper()}"
     ts = now.isoformat(timespec="seconds")
     trade_date = now.strftime("%Y-%m-%d")
 
     try:
-        df_5m = fetch_intraday(period="5d", interval="5m")
+        if df_5m is None:
+            df_5m = fetch_intraday(period="5d", interval="5m",
+                                   use_cache=use_cache)
         days = split_days(df_5m)
         if len(days) < 1:
             raise RuntimeError("no intraday sessions available")
@@ -70,16 +90,18 @@ def build_confluence_report(
         )
 
     if journal is not False:
-        _record(report, journal)
+        _record(report, journal, timeframe=timeframe)
     return report
 
 
-def _record(report: ConfluenceReport, journal=None) -> None:
+def _record(report: ConfluenceReport, journal=None, timeframe: str = "5m") -> None:
     if report.error or not report.setups:
         return
     from journal.confluence_db import ConfluenceRunRecord, shared_confluence_journal
 
-    cj = journal or shared_confluence_journal()
+    cj = shared_confluence_journal() if journal is True else journal
+    if cj is None:
+        return
     import json
 
     for s in report.setups:
@@ -100,7 +122,8 @@ def _record(report: ConfluenceReport, journal=None) -> None:
             expiry=ch.expiry if ch else "",
             entry_price=ch.entry_price if ch else None,
             delta=ch.delta if ch else None,
-            is_actual_trade=1 if s.go else 0,
+            is_actual_trade=0,
+            timeframe=timeframe,
             conditions_json=json.dumps([
                 {"name": c.name, "status": c.status.value, "detail": c.detail}
                 for c in s.conditions

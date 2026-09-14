@@ -382,9 +382,16 @@ def overnight_performance_panel(summary) -> Panel:
 OVERNIGHT_JOURNAL_HELP = (
     "[bold]oj filter[/bold] all|go|no-go|actual|hypo|ce|pe · "
     "[bold]oj settle[/bold] <id> <exit_price> · "
-    "[bold]oj search[/bold] <text> · [bold]oj show[/bold] <id> · [bold]oj run[/bold] · "
-    "[bold]oj cf filter[/bold] all|setup-a|setup-b|setup-c|go|no-go · "
-    "[bold]oj cf settle[/bold] <id> <exit_price>"
+    "[bold]oj search[/bold] <text> · [bold]oj show[/bold] <id> · [bold]oj run[/bold]"
+)
+
+
+INTRADAY_HELP = (
+    "[bold]run[/bold] evaluate A/B/C now + record the run · "
+    "[bold]cf filter[/bold] all|setup-a|setup-b|setup-c|go|no-go · "
+    "[bold]cf settle[/bold] <id> <exit_price> · "
+    "[bold]trade[/bold] <id> [lots] · "
+    "[bold]cf show[/bold] <id> · [bold]cf search[/bold] <text>"
 )
 
 
@@ -399,6 +406,7 @@ def confluence_journal_table(records: list, title: str) -> Panel:
     table.add_column("Conf", justify="right", width=5)
     table.add_column("Contract", width=16)
     table.add_column("Entry", justify="right", width=8)
+    table.add_column("Lots", justify="center", width=5)
     table.add_column("P&L", justify="right", width=11)
     table.add_column("Outcome", justify="center", width=9)
     table.add_column("Rationale / Blocked")
@@ -417,6 +425,8 @@ def confluence_journal_table(records: list, title: str) -> Panel:
             pnl_text = Text("—", style="grey50")
 
         entry_str = f"₹{r.entry_price:,.1f}" if r.entry_price is not None else "—"
+        lots_text = Text(f"{r.lots or 1}L{'●' if r.is_actual_trade else ''}",
+                         style="bold white" if r.is_actual_trade else "grey50")
         out_style = "green" if r.outcome == "WIN" else "red" if r.outcome == "LOSS" else "yellow" if r.outcome == "BREAKEVEN" else "grey50"
         gate_info = r.blocked_reasons if r.decision != "GO" and r.blocked_reasons else (r.decision_rationale or r.notes or "")
         gate_text = gate_info[:55] + ("…" if len(gate_info) > 55 else "")
@@ -431,12 +441,13 @@ def confluence_journal_table(records: list, title: str) -> Panel:
             f"{r.confidence_score:.0f}",
             r.contract_name.replace("NIFTY ", "") if r.contract_name else "—",
             entry_str,
+            lots_text,
             pnl_text,
             Text(r.outcome, style=out_style),
             gate_text,
         )
 
-    subtitle = "[dim]* Hypothetical counterfactual — A: Momentum · B: ORB · C: Reversal[/dim]"
+    subtitle = "[dim]* Hypothetical counterfactual · ● actually traded — A: Momentum · B: ORB · C: Reversal[/dim]"
     return Panel(table, title=title, subtitle=subtitle, box=box.ROUNDED)
 
 

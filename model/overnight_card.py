@@ -6,7 +6,10 @@ structures (ITM single-leg, ATM single-leg control, and Debit Spreads) through
 the 2nd-order Greek EV engine, and emits a rigorous GO / NO-GO decision.
 
 Hard Gates:
-    1. Volume verification: Unavailable feed or thin volume (<0.8x) -> Hard Block (Fail-Closed)
+    1. Participation verification: index relative volume when available;
+       otherwise constituent-breadth proxy (broad, confirmed, volume-backed
+       participation passes; narrow/divergent/dragged tape blocks). Thin
+       index volume (<0.8x) -> Hard Block (Fail-Closed)
     2. Directional confidence < 65 or Neutral -> Hard Block
     3. Directional probability P(Direction) <= 50% -> Hard Block
     4. Expiry / calendar risk -> Hard Block
@@ -28,7 +31,7 @@ from analysis.signals import Direction
 from config import SETTINGS
 from data.options import OptionChain
 from model.composite import MIN_TRADEABLE_CONFIDENCE, CompositeResult
-from model.indicators import IndicatorAssessment
+from model.indicators import IndicatorAssessment, SRLevels, sr_levels
 from model.journal import SetupJournal, SetupRecord, now_iso
 from model.magnitude import DistributionalMove, compute_distribution
 from model.options_ev import (
@@ -94,6 +97,17 @@ class OvernightSetup:
     candidates: list[object] = field(default_factory=list)
     # Contract size this setup was evaluated with (== settings.lot_size).
     lot_size: int = 75
+    # S/R-derived spot targets for the trade direction. Keys: t1, t1_pts,
+    # t1_pct, t2, t2_pts, t2_pct, reversal (str|None), label. Empty when
+    # direction is neutral or levels are unavailable. Display only.
+    targets: dict = field(default_factory=dict)
+    # How Gate 1 was resolved when index volume was missing, e.g.
+    # "breadth proxy: BROAD, 68% confirming, UDVR 1.4". Empty when the
+    # index feed itself decided the gate.
+    volume_note: str = ""
+    # Swing support/resistance over the lookback window (always computed,
+    # shown on the card for context on entries/exits).
+    sr: SRLevels | None = None
 
     @property
     def verdict(self) -> str:
@@ -157,6 +171,114 @@ def match_conditions(conds: Conditions, signals: list,
         if len(subset) >= min_bucket_n:
             return name, subset
     return "all qualifying signals", list(signals)
+
+
+def _breadth_volume_proxy(breadth, direction) -> tuple[bool, str] | None:
+    """Participation proxy for Hard Gate 1 when index volume is missing.
+
+    Returns (passed, note), or None when breadth cannot assess participation
+    (caller then keeps the fail-closed block). The proxy asks the same
+    question the volume gate asks — "is there real trading interest behind
+    this move?" — answered bottom-up:
+
+    - PASS: BROAD/LEAN participation with >=60% of names confirming the
+      index direction and volume flowing with the move (up/down volume
+      ratio aligned, falling back to advancer volume share).
+    - BLOCK: narrow/concentrated leadership, divergent tape, heavyweight
+      drag, volume flowing against the move, or missing fields.
+    """
+    if breadth is None or not getattr(breadth, "sufficient", False):
+        return None
+    if direction not in (Direction.BULLISH, Direction.BEARISH):
+        return None
+    bullish = direction is Direction.BULLISH
+    participation = getattr(breadth, "participation", "UNKNOWN")
+    ratio = getattr(breadth, "up_down_volume_ratio", None)
+    adv_share = getattr(breadth, "adv_volume_share", None)
+    conf = getattr(breadth, "confirming_pct", None)
+    conf_label = "confirming"
+    if conf is None:
+        # Flat index day: nothing to confirm against, so measure alignment
+        # with the setup direction instead (adv% for longs, dec% for shorts).
+        adv = getattr(breadth, "adv_pct", None)
+        dec = getattr(breadth, "dec_pct", None)
+        if bullish and adv is not None:
+            conf, conf_label = adv, "up (flat index)"
+        elif not bullish and dec is not None:
+            conf, conf_label = dec, "down (flat index)"
+        else:
+            return None
+    if participation in ("NARROW", "CONCENTRATED") and conf < 50:
+        return False, (f"breadth proxy: {participation}, only {conf:.0f}% {conf_label} "
+                       f"(narrow leadership)")
+    if participation == "DIVERGENT":
+        return False, (f"breadth proxy: DIVERGENT tape, {conf:.0f}% {conf_label} "
+                       f"({getattr(breadth, 'diverging_n', 0)} names against)")
+    if getattr(breadth, "heavy_drag", False):
+        return False, "breadth proxy: heavyweight drag (top-8 oppose the move)"
+    if ratio is not None:
+        aligned = ratio >= 1.0 if bullish else ratio <= 1.0
+        vol_note = f"UDVR {ratio:.1f}"
+    elif adv_share is not None:
+        aligned = adv_share >= 50 if bullish else adv_share <= 50
+        vol_note = f"adv-vol {adv_share:.0f}%"
+    else:
+        return None
+    note = (f"breadth proxy: {participation}, {conf:.0f}% {conf_label}, {vol_note}")
+    if participation in ("BROAD", "LEAN") and conf >= 60 and aligned:
+        return True, note
+    why = []
+    if participation not in ("BROAD", "LEAN"):
+        why.append(f"participation {participation}")
+    if conf < 60:
+        why.append(f"only {conf:.0f}% {conf_label}")
+    if not aligned:
+        why.append(f"volume against ({vol_note})")
+    return False, note + " — thin (" + "; ".join(why) + ")"
+
+
+def _sr_targets(sr, spot: float, direction) -> dict:
+    """Next spot targets from S/R levels for the trade direction.
+
+    T1 = nearest level that is actually a magnet in the trade's direction
+    (resistance above for longs, support below for shorts), falling back to
+    the raw range extreme. T2 = range extreme beyond T1 when distinct.
+    `reversal` flags a nearby opposing level (bounce/rejection zone) or
+    negligible room to T1 — the reversal-identification aid.
+    """
+    if sr is None or not spot or spot <= 0:
+        return {}
+    if direction is Direction.BULLISH:
+        t1 = sr.resistance if sr.resistance and sr.resistance > spot else None
+        if t1 is None and sr.recent_high > spot:
+            t1 = sr.recent_high
+        t2 = sr.recent_high if sr.recent_high > (t1 or spot) else None
+    elif direction is Direction.BEARISH:
+        t1 = sr.support if sr.support and sr.support < spot else None
+        if t1 is None and sr.recent_low < spot:
+            t1 = sr.recent_low
+        t2 = sr.recent_low if sr.recent_low < (t1 if t1 is not None else spot) else None
+    else:
+        return {}
+    out: dict = {"t1": t1, "t2": t2, "reversal": None}
+    if t1 is not None:
+        out["t1_pts"] = t1 - spot
+        out["t1_pct"] = (t1 - spot) / spot * 100
+    if t2 is not None:
+        out["t2_pts"] = t2 - spot
+        out["t2_pct"] = (t2 - spot) / spot * 100
+    if t1 is None:
+        out["reversal"] = "no S/R magnet in trade direction — breakout/breakdown into open space"
+    elif abs(out["t1_pct"]) < 0.3:
+        out["reversal"] = f"T1 only {abs(out['t1_pct']):.1f}% away — limited room, fade risk"
+    elif abs(out["t1_pct"]) < 0.5:
+        side = "bounce" if direction is Direction.BEARISH else "rejection"
+        level_name = "support" if direction is Direction.BEARISH else "resistance"
+        out["reversal"] = (f"{level_name} {t1:,.0f} within 0.5% — {side} zone, "
+                           f"watch for reversal before T1")
+    out["label"] = ("long toward resistance" if direction is Direction.BULLISH
+                    else "short toward support")
+    return out
 
 
 def build_overnight_setup(candles, chain: OptionChain | None,
@@ -236,7 +358,9 @@ def build_overnight_setup(candles, chain: OptionChain | None,
         breadth=breadth,
         breadth_points=getattr(base, "breadth_points", 0.0),
         lot_size=settings.lot_size,
+        sr=sr_levels(frame),
     )
+    setup.targets = _sr_targets(setup.sr, setup.spot, base.composite.direction)
 
     # --- Constituent breadth: divergence + scenarios ------------------------
     # VIX is fetched once (cached) for scenarios, setups and the EV branch.
@@ -297,9 +421,22 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     # --- HARD GATES & DISTANCE-TO-GO ---------------------------------------
     reasons = []
 
-    # Hard Gate 1: Fail-Closed Volume Gate (N/A blocks, Thin blocks)
+    # Hard Gate 1: Participation verification. Index feeds structurally lack
+    # volume, so when it is missing we fall back to the constituent-breadth
+    # proxy: broad, confirmed, volume-backed participation passes; narrow,
+    # divergent or heavyweight-dragged tape still blocks. Thin index volume
+    # (<0.8x) blocks as before.
     if not conds.vol_available:
-        reasons.append("relative volume UNAVAILABLE (index feed missing volume) -> gate unverified (blocking)")
+        proxy = _breadth_volume_proxy(
+            breadth if getattr(breadth, "sufficient", False) else None,
+            base.composite.direction)
+        if proxy is None:
+            reasons.append("relative volume UNAVAILABLE (index feed missing volume) -> gate unverified (blocking)")
+        else:
+            passed, note = proxy
+            setup.volume_note = note
+            if not passed:
+                reasons.append(f"breadth participation too thin -> blocking ({note})")
     elif conds.thin_volume:
         margin = 0.8 - rel_vol
         reasons.append(f"thin volume ({rel_vol:.2f}x < 0.8x threshold, need +{margin:.2f}x)")
@@ -390,14 +527,22 @@ def build_overnight_setup(candles, chain: OptionChain | None,
                 regime=setup.regime.regime.value,
             )
             
-            # Fetch latest India VIX for benchmark
+            # Latest India VIX for benchmark: Kite first, Yahoo fallback.
             vix_val = 10.56
             try:
-                macro_data = fetch_macro_history("5d")
-                if "indiavix" in macro_data and not macro_data["indiavix"].empty:
-                    vix_val = float(macro_data["indiavix"].iloc[-1])
+                from data import source
+                level, _ = source.get_india_vix()
+                if level:
+                    vix_val = level
+                else:
+                    raise ValueError("no kite vix")
             except Exception:
-                pass
+                try:
+                    macro_data = fetch_macro_history("5d")
+                    if "indiavix" in macro_data and not macro_data["indiavix"].empty:
+                        vix_val = float(macro_data["indiavix"].iloc[-1])
+                except Exception:
+                    pass
 
             best_ev, all_evs = rank_and_select_best_strategy(
                 candidates=cands,
@@ -474,7 +619,14 @@ def _breadth_nifty_context(frame) -> dict:
 
 
 def _early_vix() -> float | None:
-    """Best-effort India VIX for the scenario engine (None if unavailable)."""
+    """Best-effort India VIX: Kite first, Yahoo macro fallback."""
+    try:
+        from data import source
+        level, _ = source.get_india_vix()
+        if level:
+            return level
+    except Exception:
+        pass
     try:
         from model.macro import fetch_macro_history
         macro_data = fetch_macro_history("5d")

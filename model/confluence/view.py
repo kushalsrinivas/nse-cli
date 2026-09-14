@@ -63,16 +63,14 @@ def _setup_panel(setup: ConfluenceSetupResult) -> Panel:
     return Panel(Group(*body), box=ROUNDED, border_style="cyan")
 
 
-def render_confluence(report: ConfluenceReport, console: Console | None = None) -> None:
-    console = console or Console()
-
+def confluence_panel(report: ConfluenceReport) -> Panel:
+    """Full setups panel as a renderable (shared by CLI and TUI)."""
     if report.error:
-        console.print(Panel(
+        return Panel(
             Text(f"Confluence engine error: {report.error}", style="bold red"),
             title="[bold]INTRADAY CONFLUENCE SETUPS[/bold]",
             box=ROUNDED,
-        ))
-        return
+        )
 
     head = Table.grid(padding=(0, 2))
     head.add_column()
@@ -88,9 +86,14 @@ def render_confluence(report: ConfluenceReport, console: Console | None = None) 
         head.add_row(Text(vix_str, style="dim"), "")
 
     panels = [_setup_panel(s) for s in report.setups]
-    console.print(Panel(
+    return Panel(
         Group(head, "", *panels),
         title="[bold]THREE CONCRETE CONFLUENCE SETUPS[/bold]",
         subtitle="Live intraday evaluation — A: Momentum · B: ORB · C: Reversal",
         box=ROUNDED,
-    ))
+    )
+
+
+def render_confluence(report: ConfluenceReport, console: Console | None = None) -> None:
+    console = console or Console()
+    console.print(confluence_panel(report))

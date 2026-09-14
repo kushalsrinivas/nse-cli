@@ -36,13 +36,26 @@ THETA_DAY = PREMIUM_EST * 0.033    # ~₹11.5/session
 
 
 def fetch_intraday(period: str = "60d", interval: str = "5m",
-                   symbol: str = SETTINGS.symbol) -> pd.DataFrame:
-    """Cached intraday OHLCV frame."""
+                   symbol: str = SETTINGS.symbol, source: str = "auto",
+                   use_cache: bool = True) -> pd.DataFrame:
+    """Cached intraday OHLCV frame: Kite minute history first for NIFTY."""
     cache = shared_cache()
-    params = {"symbol": symbol, "period": period, "interval": interval}
-    cached = cache.get("intraday", params, ttl=3600)
-    if cached is not None:
-        return cached
+    params = {"symbol": symbol, "period": period, "interval": interval,
+              "source": source}
+    if use_cache:
+        cached = cache.get("intraday", params, ttl=3600)
+        if cached is not None:
+            return cached
+
+    if symbol == SETTINGS.symbol and interval == "5m":
+        try:
+            from data import source as datasrc
+            if datasrc.want_kite(source):
+                df = _kite_intraday_5m(period)
+                cache.set(df, "intraday", params)
+                return df
+        except Exception as exc:
+            log.warning("kite intraday failed (%s); yahoo fallback", exc)
 
     import yfinance as yf
     df = yf.Ticker(symbol).history(period=period, interval=interval,
@@ -54,6 +67,34 @@ def fetch_intraday(period: str = "60d", interval: str = "5m",
     df = df[(df["close"] > 0)]
     cache.set(df, "intraday", params)
     return df
+
+
+def _kite_intraday_5m(period: str) -> pd.DataFrame:
+    """NIFTY 5m bars from Kite minute history (tz-naive IST, Yahoo-shaped)."""
+    from datetime import datetime, timedelta
+
+    from data.kite import instruments as ki
+    from data.kite.rest import KiteRest, history_to_frame
+    from data.kite.store import InstrumentStore
+
+    days = {"5d": 7, "60d": 65}.get(period, 65)
+    to = datetime.now()
+    frm = to - timedelta(days=days)
+    rest, store = KiteRest(), InstrumentStore()
+    ki.refresh_master(rest, store)
+    token = ki.nifty_spot_token(store)
+    if token is None:
+        raise ValueError("NIFTY spot token missing from master")
+    frame = history_to_frame(rest.historical(token, "minute", frm, to))
+    if frame.empty:
+        raise ValueError("empty Kite minute history")
+    out = frame.resample("5min").agg(
+        {"open": "first", "high": "max", "low": "min",
+         "close": "last", "volume": "sum"}).dropna(subset=["close"])
+    if isinstance(out.index, pd.DatetimeIndex) and out.index.tz is not None:
+        out.index = out.index.tz_convert("Asia/Kolkata").tz_localize(None)
+    log.info("intraday 5m via kite (%d bars)", len(out))
+    return out[["open", "high", "low", "close", "volume"]]
 
 
 def split_days(df: pd.DataFrame) -> list[pd.DataFrame]:

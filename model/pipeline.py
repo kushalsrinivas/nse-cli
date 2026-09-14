@@ -16,8 +16,6 @@ from dataclasses import dataclass, field, replace
 from analysis.indicators import compute as compute_indicators
 from analysis.signals import Direction
 from config import SETTINGS
-from data import nifty
-from data import options as opts
 from model.composite import (
     MIN_TRADEABLE_CONFIDENCE,
     CompositeResult,
@@ -70,7 +68,8 @@ def evaluate(candles=None, chain=None, journal: SetupJournal | None = None,
     NIFTY-only baseline for reproducibility.
     """
     if candles is None:
-        candles = nifty.fetch_history().candles
+        from data import source
+        candles = source.get_nifty_history().candles
     if len(candles) < 60:
         raise ValueError("need >= 60 bars for the decision model")
 
@@ -127,7 +126,8 @@ def evaluate(candles=None, chain=None, journal: SetupJournal | None = None,
             Direction.BULLISH, Direction.BEARISH):
         if chain is None:
             try:
-                chain = opts.fetch_chain()
+                from data import source
+                chain = source.get_nifty_chain()
             except Exception as exc:
                 log.warning("option chain unavailable: %s", exc)
         if chain is not None:

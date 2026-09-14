@@ -26,8 +26,7 @@ console = Console()
 
 
 def cmd_evaluate(args) -> int:
-    from data import nifty
-    from data import options as opts
+    from data import nifty, source
     from model.pipeline import evaluate
     from model.scorecard import render_candidates, render_setup
 
@@ -36,10 +35,10 @@ def cmd_evaluate(args) -> int:
     if effective != requested_period:
         console.print(f"[yellow]{args.interval} bars: Yahoo only serves "
                       f"{effective} of history — using that.[/]")
-    result = nifty.fetch_history(period=args.period, interval=args.interval)
+    result = source.get_nifty_history(period=args.period, interval=args.interval)
     chain = None
     try:
-        chain = opts.fetch_chain()
+        chain = source.get_nifty_chain()
     except Exception as exc:
         console.print(f"[yellow]option chain unavailable: {exc}[/]")
 
@@ -51,10 +50,12 @@ def cmd_evaluate(args) -> int:
     return 0
 
 
-def _maybe_breadth(args, nifty_candles=None):
-    """Snapshot for the legacy --breadth flags (thin wrapper; see services)."""
+def _maybe_breadth(args, nifty_candles=None, enabled: bool | None = None):
+    """Snapshot wrapper; see services. `enabled=None` honors --breadth flag."""
     from services.bundles import breadth_snapshot
-    out = breadth_snapshot(enabled=bool(getattr(args, "breadth", False)),
+    if enabled is None:
+        enabled = bool(getattr(args, "breadth", False))
+    out = breadth_snapshot(enabled=enabled,
                            nifty_candles=nifty_candles)
     for kind, msg in out.notices:
         console.print(f"[yellow]{msg}[/]" if kind == "warn" else f"[dim]{msg}[/]")
@@ -62,10 +63,10 @@ def _maybe_breadth(args, nifty_candles=None):
 
 
 def cmd_backtest(args) -> int:
-    from data import nifty
+    from data import source
     from model.backtest import calibrate_win_probability, format_report, run_backtest
 
-    result = nifty.fetch_history(period=args.period)
+    result = source.get_nifty_history(period=args.period)
     console.print(f"backtesting on {len(result.candles)} bars "
                   f"({result.candles[0].timestamp:%Y-%m-%d} → "
                   f"{result.candles[-1].timestamp:%Y-%m-%d}) ...")
@@ -77,11 +78,11 @@ def cmd_backtest(args) -> int:
 
 
 def cmd_optimize(args) -> int:
-    from data import nifty
+    from data import source
     from model.backtest import _weights_to_pseudo_reliability, optimize_weights
     from model.weights import save_learned_weights
 
-    result = nifty.fetch_history(period="5y")
+    result = source.get_nifty_history(period="5y")
     candles = result.candles
     split = int(len(candles) * 0.7)
     console.print(f"optimizing: {split} train / {len(candles) - split} validation bars")
@@ -172,22 +173,22 @@ def cmd_journal(args) -> int:
 
 def cmd_overnight(args) -> int:
     """Tonight's GO/NO-GO card for the buy-at-close overnight play."""
-    from data import nifty
-    from data import options as opts
+    from data import source
     from model.macro import live_snapshot
     from model.overnight import collect_overnight_signals
     from model.overnight_card import build_overnight_setup
     from model.overnight_view import render_overnight
 
-    result = nifty.fetch_history(period=args.period)
+    result = source.get_nifty_history(period=args.period)
     chain = None
     try:
-        chain = opts.fetch_chain()
+        chain = source.get_nifty_chain()
     except Exception as exc:
         console.print(f"[yellow]option chain unavailable: {exc}[/]")
 
     signals = collect_overnight_signals(result.candles)
-    breadth_snap = _maybe_breadth(args, result.candles)
+    breadth_snap = _maybe_breadth(args, result.candles,
+                                  enabled=not getattr(args, "no_breadth", False))
     setup = build_overnight_setup(result.candles, chain, signals=signals,
                                   events=args.event or None, breadth=breadth_snap)
     if args.event:
@@ -310,7 +311,7 @@ def cmd_tonight(args) -> int:
 
     try:
         result = run_tonight(
-            period=args.period, source=getattr(args, "source", "yahoo") or "yahoo",
+            period=args.period, source=getattr(args, "source", "auto") or "auto",
             cperiod=args.cperiod, no_breadth=getattr(args, "no_breadth", False),
             events=args.event or None, journal=args.journal)
     except KiteAuthError as exc:
@@ -596,7 +597,7 @@ def cmd_stock_overnight(args) -> int:
     from services.stock_screen import run_stock_screen
 
     shorts = [args.symbol.upper()] if args.symbol else None
-    source = getattr(args, "source", "yahoo") or "yahoo"
+    source = getattr(args, "source", "auto") or "auto"
     console.print(f"[bold]Stock overnight[/bold] — {args.lots} lot(s) per GO"
                   f"{'' if shorts is None else f' — {shorts[0]} only'}"
                   f" — {source}"
@@ -648,6 +649,91 @@ def cmd_stock_overnight(args) -> int:
     if not args.journal:
         console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
     return 0
+
+
+def cmd_confluence(args) -> int:
+    """Evaluate intraday Setups A/B/C on the required timeframe.
+
+    Dry run by default; --journal records the run (3 rows, one per setup,
+    always hypothetical until marked with --trade). Use --trade ID to mark
+    a recorded run as actually taken, with --lots for size.
+    """
+    from model.confluence.view import render_confluence
+    from services.intraday import run_confluence
+
+    if args.trade is not None:
+        from journal.confluence_db import shared_confluence_journal
+        cj = shared_confluence_journal()
+        try:
+            rec = cj.mark_traded(args.trade, args.lots)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/]")
+            return 1
+        if not rec:
+            console.print(f"[red]confluence record #{args.trade} not found[/]")
+            return 1
+        console.print(f"[green]marked #{rec.id} Setup {rec.setup_id} as TRADED "
+                      f"({rec.lots} lot(s)) — settle with cj --settle when done[/]")
+        return 0
+
+    if args.live:
+        try:
+            _validate_until(args.until)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/]")
+            return 1
+        return cmd_confluence_live(args)
+
+    try:
+        report = run_confluence(source=args.source, timeframe=args.timeframe,
+                                journal=True if args.journal else False,
+                                events=args.event or None)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        return 1
+    except Exception as exc:
+        console.print(f"[red]evaluation failed: {exc}[/]")
+        return 1
+    render_confluence(report, console)
+    if not args.journal:
+        console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
+    return 0
+
+
+def cmd_confluence_live(args) -> None:
+    """Handler shared by `confluence --live` (KeyboardInterrupt-safe)."""
+    from model.confluence.view import render_confluence
+    from services.intraday import run_confluence_live
+
+    def on_report(report, journaled):
+        verdicts = " · ".join(f"{s.setup_id}={s.decision}" for s in report.setups)
+        tag = "journaled" if journaled else "dry"
+        console.print(f"[dim]{report.timestamp}[/] NIFTY {report.spot:,.1f} "
+                      f"| {verdicts or report.error or 'n/a'} [{tag}]")
+        if args.verbose:
+            render_confluence(report, console)
+
+    def on_error(exc):
+        console.print(f"[yellow]poll failed ({exc}); continuing[/]")
+
+    summary = run_confluence_live(
+        source=args.source, timeframe=args.timeframe,
+        journal=not args.dry_run, events=args.event or None,
+        poll_secs=args.every, until=args.until,
+        on_report=on_report, on_error=on_error)
+    console.print(f"[bold]live session {summary['status']}[/] — "
+                  f"{summary['evals']} evals, {summary['journaled']} journaled, "
+                  f"{summary['errors']} errors"
+                  f"{' (interrupted)' if summary['interrupted'] else ''}")
+    return 0
+
+
+def _validate_until(value: str) -> None:
+    try:
+        h, m = value.split(":")
+        assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+    except Exception as exc:
+        raise ValueError(f"--until must be HH:MM (24h IST), got {value!r}") from exc
 
 
 def cmd_overnight_journal(args) -> int:
@@ -727,8 +813,7 @@ def cmd_confluence_journal(args) -> int:
 
 def cmd_breadth(args) -> int:
     """Tonight's constituent breadth snapshot + overnight scenarios."""
-    from data import nifty
-    from data.constituents import fetch_constituent_history
+    from data import source
     from model.breadth.live import build_live_snapshot
     from model.breadth.scenarios import build_scenarios, narrative
     from model.breadth.view import (
@@ -738,9 +823,9 @@ def cmd_breadth(args) -> int:
     )
     from model.pipeline import evaluate
 
-    result = nifty.fetch_history(period=args.period)
+    result = source.get_nifty_history(period=args.period)
     try:
-        bundle = fetch_constituent_history(period="6mo")
+        bundle = source.get_constituent_bundle(period="6mo")
     except Exception as exc:
         console.print(f"[red]constituent fetch failed: {exc}[/]")
         return 1
@@ -765,14 +850,13 @@ def cmd_breadth(args) -> int:
 
 def cmd_breadth_backtest(args) -> int:
     """Ablation: NIFTY-only vs NIFTY+breadth on shared history."""
-    from data import nifty
-    from data.constituents import fetch_constituent_history
+    from data import source
     from model.breadth.backtest import format_breadth_report, run_comparison
 
-    result = nifty.fetch_history(period=args.period)
+    result = source.get_nifty_history(period=args.period)
     console.print(f"replaying {len(result.candles)} NIFTY bars ...")
     try:
-        bundle = fetch_constituent_history(period=args.period)
+        bundle = source.get_constituent_bundle(period=args.period)
     except Exception as exc:
         console.print(f"[red]constituent fetch failed: {exc}[/]")
         return 1
@@ -785,7 +869,7 @@ def cmd_breadth_backtest(args) -> int:
 
 def cmd_research(args) -> int:
     """Historical research: what follows qualifying closes?"""
-    from data import nifty
+    from data import source
     from model.backtest import _base_frame
     from model.overnight import (
         collect_overnight_signals,
@@ -793,7 +877,7 @@ def cmd_research(args) -> int:
         premium_outlook,
     )
 
-    result = nifty.fetch_history(period=args.period)
+    result = source.get_nifty_history(period=args.period)
     console.print(f"replaying {len(result.candles)} bars ...")
     signals = collect_overnight_signals(result.candles)
     if not signals:
@@ -842,8 +926,8 @@ def main() -> int:
 
     ov = sub.add_parser("overnight", help="tonight's GO/NO-GO card for the overnight play")
     ov.add_argument("--period", default="2y")
-    ov.add_argument("--breadth", action="store_true",
-                    help="attach constituent breadth + scenarios to the overnight card")
+    ov.add_argument("--no-breadth", action="store_true",
+                    help="skip constituent breadth + scenarios (breadth on by default)")
     ov.add_argument("--event", action="append", default=[],
                     help="known scheduled risk tonight, e.g. "
                          "--event 'US-Iran sanctions' (repeatable). "
@@ -866,6 +950,30 @@ def main() -> int:
     cj.add_argument("--settle", nargs=2, metavar=("ID", "EXIT_PRICE"))
     cj.add_argument("--notes", default=None)
 
+    cf = sub.add_parser("confluence", help="evaluate intraday Setups A/B/C now (dry-run default)")
+    cf.add_argument("--timeframe", default="5m",
+                    help="required pull timeframe (currently only 5m; 15m derived internally)")
+    cf.add_argument("--journal", action="store_true",
+                    help="record the run: 3 rows, always hypothetical until --trade")
+    cf.add_argument("--event", action="append", default=[],
+                    help="known intraday risk (repeatable)")
+    cf.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"),
+                    help="5m bars source: kite-first with fallback (default auto)")
+    cf.add_argument("--trade", type=int, default=None, metavar="ID",
+                    help="mark a recorded run as actually taken")
+    cf.add_argument("--lots", type=int, default=1,
+                    help="lots for --trade (default 1)")
+    cf.add_argument("--live", action="store_true",
+                    help="run all session: evaluate every new 5m bar (journals unless --dry-run)")
+    cf.add_argument("--every", type=int, default=60,
+                    help="poll interval in seconds for --live (default 60)")
+    cf.add_argument("--dry-run", action="store_true",
+                    help="with --live: evaluate without journaling")
+    cf.add_argument("--until", default="15:35",
+                    help="stop time HH:MM IST for --live (default 15:35)")
+    cf.add_argument("--verbose", action="store_true",
+                    help="with --live: print the full setup table per evaluation")
+
     br = sub.add_parser("breadth", help="tonight's constituent breadth + scenarios")
     br.add_argument("--period", default="1y")
     br.add_argument("--event", action="append", default=[],
@@ -876,8 +984,8 @@ def main() -> int:
 
     tn = sub.add_parser("tonight", help="one EOD run: fetch once, verdict first (dry-run default)")
     tn.add_argument("--period", default="2y")
-    tn.add_argument("--source", default="yahoo", choices=("yahoo", "kite"),
-                    help="market-data source (kite needs a session; default yahoo)")
+    tn.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"),
+                    help="market-data source: kite-first with fallback (default auto)")
     tn.add_argument("--cperiod", default=TONIGHT_CPERIOD,
                     help="constituent history window (default 6mo)")
     tn.add_argument("--event", action="append", default=[],
@@ -898,8 +1006,8 @@ def main() -> int:
                     help="record to the separate stock journal (default: dry-run)")
     so.add_argument("--event", action="append", default=[],
                     help="known scheduled risk tonight (repeatable)")
-    so.add_argument("--source", default="yahoo", choices=("yahoo", "kite"),
-                    help="history+chain source (kite needs a session; default yahoo)")
+    so.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"),
+                    help="history+chain source: kite-first with fallback (default auto)")
 
     kl = sub.add_parser("kite-login", help="Kite session: login URL / token exchange / status")
     kl.add_argument("--request-token", default=None,
@@ -943,6 +1051,7 @@ def main() -> int:
         "kite-live": cmd_kite_live,
         "confluence-journal": cmd_confluence_journal,
         "cj": cmd_confluence_journal,
+        "confluence": cmd_confluence,
     }
     return cmd_map[args.cmd](args)
 

@@ -119,7 +119,7 @@ def evaluate_stock(short: str, *, lots: int = 1,
                    events: list[str] | None = None,
                    record: bool = False,
                    journal=None,
-                   source: str = "yahoo",
+                   source: str = "auto",
                    rest=None, store=None) -> StockOvernightResult:
     """One symbol, full overnight card, naked CE/PE only (user constraint).
 
@@ -131,6 +131,9 @@ def evaluate_stock(short: str, *, lots: int = 1,
     from model.overnight import collect_overnight_signals
     from model.overnight_card import build_overnight_setup
 
+    if source == "auto":
+        from data import source as datasrc
+        source = "kite" if datasrc.session_available() else "yahoo"
     res = StockOvernightResult(short=short, lots=lots)
     try:
         res.lot_size = lot_for(short)
@@ -140,6 +143,9 @@ def evaluate_stock(short: str, *, lots: int = 1,
         return res
     settings = dataclasses.replace(SETTINGS, lot_size=res.lot_size)
     basis_bps, fut_oi_chg = None, None
+    if source == "auto":
+        from data import source as datasrc
+        source = "kite" if datasrc.session_available() else "yahoo"
 
     try:
         if source == "kite":
@@ -265,7 +271,7 @@ def evaluate_stock(short: str, *, lots: int = 1,
 def evaluate_all(shorts: list[str] | None = None, *, lots: int = 1,
                  record: bool = False, journal=None,
                  events: list[str] | None = None,
-                 on_progress=None, source: str = "yahoo") -> list[StockOvernightResult]:
+                 on_progress=None, source: str = "auto") -> list[StockOvernightResult]:
     """Run every symbol; one failure never stops the batch.
 
     Yahoo path shares one history bundle for all names. Kite path shares
@@ -276,6 +282,9 @@ def evaluate_all(shorts: list[str] | None = None, *, lots: int = 1,
     """
     rest = store = None
     bundle = None
+    if source == "auto":
+        from data import source as datasrc
+        source = "kite" if datasrc.session_available() else "yahoo"
     if source == "kite":
         from data.kite import instruments as ki
         from data.kite.rest import KiteRest

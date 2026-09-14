@@ -31,8 +31,8 @@ def parse_args() -> argparse.Namespace:
                         help="filter journal: all|go|no-go|actual|hypo|ce|pe|setup-a|setup-b|setup-c")
     parser.add_argument("--tonight", action="store_true",
                         help="one EOD run: fetch once, verdict first (dry-run default, no TUI)")
-    parser.add_argument("--source", default="yahoo", choices=("yahoo", "kite"),
-                        help="with --tonight/--stock-overnight: market-data source (default yahoo)")
+    parser.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"),
+                        help="with --tonight/--stock-overnight: kite-first with fallback (default auto)")
     parser.add_argument("--event", action="append", default=[],
                         help="known scheduled risk tonight, e.g. --event 'RBI policy' (repeatable)")
     parser.add_argument("--verbose", action="store_true",
@@ -45,6 +45,14 @@ def parse_args() -> argparse.Namespace:
                         help="with --tonight: constituent history window")
     parser.add_argument("--confluence", action="store_true",
                         help="live intraday confluence evaluation (Setups A/B/C, dry-run default, no TUI)")
+    parser.add_argument("--intraday-live", action="store_true",
+                        help="run confluence all session, journaling every new 5m bar (no TUI)")
+    parser.add_argument("--every", type=int, default=60,
+                        help="poll interval in seconds for --intraday-live (default 60)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --intraday-live: evaluate without journaling")
+    parser.add_argument("--until", default="15:35",
+                        help="stop time HH:MM IST for --intraday-live (default 15:35)")
     parser.add_argument("--stock-overnight", action="store_true",
                         help="naked CE/PE overnight per stock, ranked GO table (dry-run default, no TUI)")
     parser.add_argument("--settle-stock", nargs=2, metavar=("ID", "EXIT_PRICE"),
@@ -76,23 +84,36 @@ def main() -> int:
     if args.confluence:
         from rich.console import Console
 
-        from data import options as opts
-        from model.confluence.engine import build_confluence_report
         from model.confluence.view import render_confluence
+        from services.intraday import run_confluence
 
         console = Console()
         try:
-            chain = opts.fetch_chain()
+            report = run_confluence(source=args.source,
+                                    events=args.event or None,
+                                    journal=True if args.journal else False)
         except Exception as exc:
-            chain = None
-            console.print(f"[yellow]option chain unavailable: {exc}[/]")
-        report = build_confluence_report(
-            chain=chain, events=args.event or None,
-            journal=None if args.journal else False)
+            console.print(f"[red]evaluation failed: {exc}[/]")
+            return 1
         render_confluence(report, console)
         if not args.journal:
             console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
         return 0
+
+    if args.intraday_live:
+        import types as _types
+
+        import model_cli
+        try:
+            model_cli._validate_until(args.until)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
+        ns = _types.SimpleNamespace(
+            live=True, timeframe="5m", journal=False, dry_run=args.dry_run,
+            event=args.event, source=args.source, every=args.every,
+            until=args.until, verbose=args.verbose, trade=None, lots=1)
+        return model_cli.cmd_confluence_live(ns)
 
     if args.stock_overnight:
         import types as _types
@@ -177,19 +198,18 @@ def main() -> int:
         return 0
 
     if args.classic:
-        from data import nifty
-        from data import options as opts
+        from data import nifty, source
         from ui import terminal
 
         period = args.period or SETTINGS.period
         try:
-            result = nifty.fetch_history(period=period, interval=args.interval)
+            result = source.get_nifty_history(period=period, interval=args.interval)
             terminal.status_line(f"loaded {len(result.candles)} bars")
         except (nifty.MarketDataError, ValueError) as exc:
             terminal.console.print(terminal.error_panel(f"Market data failed: {exc}"))
             return 1
         try:
-            chain = opts.fetch_chain()
+            chain = source.get_nifty_chain()
         except Exception as exc:
             chain = None
             terminal.status_line(f"options unavailable: {exc}", ok=False)
@@ -205,10 +225,10 @@ def main() -> int:
             if cmd in ("q", "quit", "exit"):
                 return 0
             elif cmd == "r":
-                result = nifty.fetch_history(period=period, interval=args.interval,
-                                             use_cache=False)
+                result = source.get_nifty_history(period=period, interval=args.interval,
+                                                  use_cache=False)
                 try:
-                    chain = opts.fetch_chain(use_cache=False)
+                    chain = source.get_nifty_chain(use_cache=False)
                 except Exception:
                     pass
                 selected_expiry = chain.expiries[0] if chain else selected_expiry

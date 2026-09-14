@@ -17,6 +17,42 @@ def _bar(score: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def _sr_cell(level: float | None, spot: float, above: bool) -> tuple[str, str]:
+    """Render one S/R level as (text, style): value + distance from spot.
+
+    Green = price is through/past the level in the constructive sense
+    (above resistance, holding above support); red = level still overhead
+    as resistance or broken support below. Positional context only.
+    """
+    if level is None or not spot:
+        return "—", "grey50"
+    diff = level - spot
+    pct = diff / spot * 100
+    arrow = "▲" if diff > 0 else "▼" if diff < 0 else "●"
+    color = "green" if diff < 0 else "red"
+    return f"{level:,.0f} ({pct:+.1f}%, {diff:+.0f}p) {arrow}", color
+
+
+def _target_cell(targets: dict) -> tuple[str, str]:
+    """T1 (+T2 extension) from the S/R-derived trade plan."""
+    t1 = targets.get("t1")
+    if t1 is None:
+        return "—", "grey50"
+    txt = f"{t1:,.0f} ({targets.get('t1_pct', 0.0):+.1f}%, {targets.get('t1_pts', 0.0):+.0f}p)"
+    t2 = targets.get("t2")
+    if t2 is not None:
+        txt += f" → {t2:,.0f} ({targets.get('t2_pct', 0.0):+.1f}%)"
+    color = "green" if targets.get("t1_pts", 0.0) > 0 else "red"
+    return txt, color
+
+
+def _reversal_cell(targets: dict) -> tuple[str, str]:
+    rev = targets.get("reversal")
+    if not rev:
+        return "clear", "grey50"
+    return rev, "bold yellow"
+
+
 def render_overnight(setup: OvernightSetup, console: Console | None = None) -> None:
     console = console or Console()
     c = setup.composite
@@ -41,19 +77,29 @@ def render_overnight(setup: OvernightSetup, console: Console | None = None) -> N
     setup_grid.add_column()
 
     close_desc = setup.conditions.close_location.value
-    rel_v = (
-        setup.conditions.vol_spike and "Spike (≥1.3x)" or (setup.conditions.thin_volume and "Thin (<0.8x)" or "Normal")
-        if setup.conditions.vol_available else "UNAVAILABLE (Index Feed)"
-    )
+    if setup.conditions.vol_available:
+        rel_v = (setup.conditions.vol_spike and "Spike (≥1.3x)"
+                 or (setup.conditions.thin_volume and "Thin (<0.8x)" or "Normal"))
+        rel_v_style = "white"
+    elif getattr(setup, "volume_note", ""):
+        rel_v = setup.volume_note
+        rel_v_style = "white"
+    else:
+        rel_v = "UNAVAILABLE (Index Feed)"
+        rel_v_style = "bold yellow"
     ema_type = "Aligned (With-Trend)" if setup.conditions.with_trend else "Counter-Trend"
 
     setup_grid.add_row("Direction Call", Text(f"{trade_label} ({c.score:.0f}/100)", style=f"bold {dir_color}"),
                        "Close Location", Text(close_desc, style="white"))
-    setup_grid.add_row("Relative Volume", Text(rel_v, style="white" if setup.conditions.vol_available else "bold yellow"),
+    setup_grid.add_row("Relative Volume", Text(rel_v, style=rel_v_style),
                        "Micro Trend", Text(ema_type, style="white"))
     setup_grid.add_row("Matched Cohort", Text(f"'{setup.matched_bucket}' (n={setup.hist_n})", style="cyan"),
                        "Cohort Win Rate", Text(f"{setup.hist_win_rate_open * 100:.1f}%",
                                                style="green" if setup.hist_win_rate_open > 0.50 else "red"))
+    setup_grid.add_row("Resistance", Text(*_sr_cell(getattr(setup, "sr", None) and setup.sr.resistance, setup.spot, above=True)),
+                       "Support", Text(*_sr_cell(getattr(setup, "sr", None) and setup.sr.support, setup.spot, above=False)))
+    setup_grid.add_row("Next Target", Text(*_target_cell(getattr(setup, "targets", None) or {})),
+                       "Reversal Watch", Text(*_reversal_cell(getattr(setup, "targets", None) or {})))
 
     # Distributional Expected Raw NIFTY Move Table
     dist_table = Table(box=SIMPLE, show_header=True, expand=True, padding=(0, 1))

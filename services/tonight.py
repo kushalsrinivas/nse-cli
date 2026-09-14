@@ -21,7 +21,7 @@ class TonightResult:
     notices: list[tuple[str, str]] = field(default_factory=list)
 
 
-def run_tonight(*, period: str = "2y", source: str = "yahoo",
+def run_tonight(*, period: str = "2y", source: str = "auto",
                 cperiod: str = "6mo", no_breadth: bool = False,
                 events: list[str] | None = None,
                 journal: bool = False) -> TonightResult:

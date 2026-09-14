@@ -51,6 +51,22 @@ token remap on master refresh; 403 → explicit relogin (no silent retry);
 per-module logging; health via client/store/aggregator counters;
 graceful shutdown flushes store.
 
+## Phase 4 — Kite-first routing (`data/source.py`)
+
+Every NSE-sourced feed resolves through one router: **Kite when a session
+is valid, legacy Yahoo/NSE-scrape fallback otherwise.** Tri-state
+`--source auto|yahoo|kite` (default `auto`; explicit `kite` fails loud
+without a session). Macro/global feeds (`model/macro.py`: US indices,
+crude, FX, Asia) are deliberately untouched, as are the parity baselines
+in `services/kite_ops.py` and `scripts/*` research tools.
+
+- NIFTY history / chains, constituent bundles, stock chains+expiries,
+  5m intraday (`fetch_intraday`), India VIX — all Kite-first.
+- Tonight EOD proxies NIFTY volume from the front future (index packets
+  carry none); verdict card shows `source: kite` + basis/OI provenance.
+- `get_india_vix()` (120s TTL) feeds the EV benchmark, scenario engine
+  and confluence VIX gates; each keeps its Yahoo-macro fallback.
+
 ## Phase 3 — chain builder, EOD-from-Kite, futures positioning
 
 - `data/kite/chain.py`: chains assembled from master legs + one /quote
