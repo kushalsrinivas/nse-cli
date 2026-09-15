@@ -98,7 +98,10 @@ def compute_adjustment(
 
     points = round(max(-MAX_ADJUST, min(MAX_ADJUST, raw)), 1)
     adj.points = points
-    adj.adjusted_score = round(base_score + points, 1)
+    # Clamp to the 0-100 scale the score is defined on and rendered as.
+    # compute_composite() clamps; this adjustment must too, or the card
+    # shows "101/100" (seen in the overnight journal).
+    adj.adjusted_score = round(max(0.0, min(100.0, base_score + points)), 1)
     adj.rationale.append(
         f"breadth {snap.breadth_score:+.0f} ({snap.participation.lower()}, "
         f"confirm {snap.confirming_pct}%) → {points:+.1f}pts (regime w {rw})")

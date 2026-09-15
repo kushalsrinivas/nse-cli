@@ -385,6 +385,15 @@ def generate_strategy_candidates(
 
     legs_data.sort(key=lambda item: item[0])
 
+    # Degenerate-chain guard. On expiry evening every delta collapses toward
+    # 0 or 1, so "closest to 0.50" cheerfully returns a delta-1.00 contract
+    # and labels it ATM — a synthetic future with no gamma and no vega,
+    # which the EV engine then reports as a triple-digit-return option
+    # trade. If no strike sits in a plausible ATM band, there is no ATM and
+    # the whole candidate set is meaningless. Fail closed.
+    if not any(0.35 <= abs(item[2]["delta"]) <= 0.65 for item in legs_data):
+        return []
+
     # 1. Identify true ATM candidate (delta closest to 0.50)
     atm_item = min(legs_data, key=lambda item: abs(abs(item[2]["delta"]) - 0.50))
     atm_strike, atm_leg, atm_greeks, atm_row = atm_item
@@ -736,12 +745,23 @@ def evaluate_strategy(
     if candidate.dte == 0:
         rejections.append("0 DTE expiry evening")
 
-    is_tradeable = (len(rejections) == 0)
+    # Invariant guardrails. These were bare `assert`s: they vanish under
+    # `python -O` and otherwise crash the whole overnight command from
+    # inside a library function. A violated invariant means the numbers
+    # below cannot be trusted, so it makes the candidate untradeable —
+    # fail closed, stay alive, and say why.
+    for ok, message in (
+        (abs((p_profit + p_be_band + p_loss) - 1.0) < 1e-4,
+         "internal: probability partition does not sum to 1.0"),
+        (p_profit <= p_dir + 1e-3,
+         "internal: P(profit) exceeds P(direction) — repricing inconsistent"),
+        (abs(bridge_total - net_ev) < 1.0,
+         "internal: EV bridge does not foot to Net EV"),
+    ):
+        if not ok:
+            rejections.append(message)
 
-    # Invariant Guardrail Assertions
-    assert abs((p_profit + p_be_band + p_loss) - 1.0) < 1e-4, "Probability partition must sum to 1.0"
-    assert p_profit <= p_dir + 1e-3, "Profit probability cannot exceed directional alignment"
-    assert abs(bridge_total - net_ev) < 1.0, "EV bridge must foot exactly to Net EV"
+    is_tradeable = (len(rejections) == 0)
 
     return StrategyEV(
         candidate=candidate,

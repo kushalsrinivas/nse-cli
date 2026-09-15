@@ -181,7 +181,8 @@ def render_divergence(flags: list[DivergenceSignal],
     console.print(divergence_panel(flags))
 
 
-def render_scenarios(scen: ScenarioSet, console: Console | None = None) -> None:
+def render_scenarios(scen: ScenarioSet, console: Console | None = None,
+                     direction: str = "neutral") -> None:
     console = console or Console()
     t = Table(title=f"Overnight scenarios — posture {scen.posture}")
     t.add_column("Scenario")
@@ -189,7 +190,7 @@ def render_scenarios(scen: ScenarioSet, console: Console | None = None) -> None:
     for k, v in sorted(scen.probs.items(), key=lambda kv: -kv[1]):
         t.add_row(k, f"{v:.0%}")
     console.print(t)
-    st = structure_view(scen)
+    st = structure_view(scen, direction)
     u = Table(title="Structure screen (needs EV confirmation)")
     u.add_column("Structure")
     u.add_column("View")

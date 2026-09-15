@@ -572,8 +572,10 @@ def build_overnight_setup(candles, chain: OptionChain | None,
                 # Sizing calculation if tradeable
                 if best_ev.is_tradeable and best_ev.net_ev_per_lot > 0:
                     prem = best_ev.candidate.net_premium
-                    stop_p = round(prem * (1 - settings.default_stop_pct / 100), 2)
-                    target_p = round(prem * (1 + settings.default_stop_pct * settings.target_multiplier / 100), 2)
+                    stop_p = round(prem * (1 - settings.default_stop_frac), 2)
+                    target_p = round(
+                        prem * (1 + settings.default_stop_frac
+                                * settings.target_multiplier), 2)
                     result = RiskManager(settings=settings).size(
                         premium=prem,
                         stop_price=stop_p,

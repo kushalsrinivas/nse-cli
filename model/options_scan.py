@@ -90,12 +90,12 @@ class OptionCandidate:
 
     @property
     def stop_price(self) -> float:
-        return round(self.premium * (1 - SETTINGS.default_stop_pct / 100), 2)
+        return round(self.premium * (1 - SETTINGS.default_stop_frac), 2)
 
     @property
     def target_price(self) -> float:
         return round(self.premium
-                     + (self.premium * SETTINGS.default_stop_pct / 100)
+                     + (self.premium * SETTINGS.default_stop_frac)
                      * SETTINGS.target_multiplier, 2)
 
 

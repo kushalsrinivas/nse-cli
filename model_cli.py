@@ -24,6 +24,12 @@ from config import SETTINGS
 
 console = Console()
 
+#: A weight fit is only persisted with this many held-out trades behind it.
+MIN_VALIDATION_TRADES = 30
+
+#: Archived sessions needed before an options backtest is worth running.
+MIN_BACKTEST_SESSIONS = 40
+
 
 def cmd_evaluate(args) -> int:
     from data import nifty, source
@@ -101,15 +107,29 @@ def cmd_optimize(args) -> int:
 
     train_bt_summary = meta.get("train_summary", {})
     val_bt_summary = meta.get("validation_summary", {})
-    # Persist group reliabilities derived from the fitted weights so the live
-    # pipeline picks them up.
+    # Persist only a fit that earned it. The previously shipped artefact
+    # recorded validation_expectancy_r = -0.451 in its own metadata and was
+    # still loaded on every live run; a losing fit is worse than no fit.
+    val_exp = val_bt_summary.get("expectancy_r")
+    val_trades = val_bt_summary.get("trades", 0) or 0
+    if val_exp is None or val_trades < MIN_VALIDATION_TRADES or val_exp <= 0:
+        console.print(
+            f"\n[yellow]not saved:[/] held-out expectancy "
+            f"{val_exp if val_exp is not None else 'n/a'} R over {val_trades} "
+            f"trades — need > 0 R over ≥ {MIN_VALIDATION_TRADES}. "
+            "Baseline weights stay in force.")
+        return 1
+
     rels = _weights_to_pseudo_reliability(weights.weights)
     save_learned_weights(rels, meta={
         "trained_on": f"{candles[0].timestamp:%Y-%m-%d}..{candles[split].timestamp:%Y-%m-%d}",
+        "validated_on": f"{candles[split].timestamp:%Y-%m-%d}..{candles[-1].timestamp:%Y-%m-%d}",
         "train_trades": train_bt_summary.get("trades"),
-        "validation_expectancy_r": val_bt_summary.get("expectancy_r"),
+        "validation_trades": val_trades,
+        "validation_expectancy_r": val_exp,
     })
-    console.print(f"\n[green]saved learned weights → {args.path or 'model/learned_weights.json'}[/]")
+    console.print(f"\n[green]saved learned weights → {args.path or 'model/learned_weights.json'}[/] "
+                  f"(held-out {val_exp:+.3f} R over {val_trades} trades)")
     return 0
 
 
@@ -190,7 +210,8 @@ def cmd_overnight(args) -> int:
     breadth_snap = _maybe_breadth(args, result.candles,
                                   enabled=not getattr(args, "no_breadth", False))
     setup = build_overnight_setup(result.candles, chain, signals=signals,
-                                  events=args.event or None, breadth=breadth_snap)
+                                  events=args.event or None, breadth=breadth_snap,
+                                  record=args.journal)
     if args.event:
         console.print("[bold red]⚠ EVENT NIGHT:[/] " +
                       "; ".join(args.event) + " — gap distribution is "
@@ -205,10 +226,14 @@ def cmd_overnight(args) -> int:
         _rb(breadth_snap, console)
         _rd(setup.divergence_flags, console)
         if setup.scenarios is not None:
-            _rs(setup.scenarios, console)
+            _rs(setup.scenarios, console, setup.composite.direction.value)
 
     snap = live_snapshot()
     _render_macro_board(snap)
+    if not args.journal:
+        console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
+    else:
+        console.print("[dim]recorded to overnight + setup journals[/]")
     return 0
 
 
@@ -270,7 +295,8 @@ def _render_verdict(setup, screen, snap, kite_meta=None) -> None:
                      f"chop/reversal {sc.chop_prob:.0%} · "
                      f"adverse/event {sc.adverse_gap_prob:.0%}")
         from model.breadth.scenarios import structure_view
-        prefs = [k for k, v in structure_view(sc).items()
+        prefs = [k for k, v in structure_view(
+                     sc, setup.composite.direction.value).items()
                  if v.startswith(("preferred", "candidate"))]
         lines.append(f"structures: {', '.join(prefs) if prefs else 'none'}")
     if setup.overnight_setups is not None:
@@ -336,13 +362,64 @@ def cmd_tonight(args) -> int:
             _rb(snap, console)
             _rd(setup.divergence_flags, console)
             if setup.scenarios is not None:
-                _rs(setup.scenarios, console)
+                _rs(setup.scenarios, console, setup.composite.direction.value)
         _render_macro_board()
     if not args.journal:
         console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
     else:
         console.print("[dim]recorded to overnight + setup journals[/]")
     return 0
+
+
+def cmd_archive_chain(args) -> int:
+    """Persist tonight's option chain. Cron this at ~15:25 IST."""
+    from data import source
+    from journal.chain_archive import ChainArchive
+
+    archive = ChainArchive()
+    underlying = (args.underlying or "NIFTY").upper()
+    fetch = (source.get_nifty_chain if underlying == "NIFTY"
+             else lambda **kw: source.get_stock_chain(underlying, **kw))
+
+    try:
+        first = fetch(use_cache=False, source=args.source)
+    except Exception as exc:
+        console.print(f"[red]chain fetch failed: {exc}[/]")
+        return 1
+    if not first or not first.rows:
+        console.print("[red]chain came back empty — nothing archived[/]")
+        return 1
+
+    targets = list(first.expiries[:max(args.expiries, 1)]) or [None]
+    captured = 0
+    for i, expiry in enumerate(targets):
+        try:
+            chain = first if i == 0 else fetch(expiry=expiry, use_cache=False,
+                                               source=args.source)
+        except Exception as exc:
+            console.print(f"[yellow]{expiry}: {exc} — skipped[/]")
+            continue
+        if not chain or not chain.rows:
+            console.print(f"[yellow]{expiry}: empty — skipped[/]")
+            continue
+        res = archive.capture(chain, underlying=underlying, source=args.source)
+        note = f" ({res.replaced} replaced)" if res.replaced else ""
+        spot_note = f"  spot {res.spot:,.2f}" if res.spot else ""
+        console.print(f"[green]{res.trade_date}[/] {underlying} "
+                      f"{', '.join(res.expiries)}: {res.strikes} strikes"
+                      f"{note}{spot_note}")
+        captured += res.strikes
+
+    cov = archive.coverage(underlying)
+    span = f", {cov['first']} → {cov['last']}" if cov["days"] else ""
+    console.print(f"[dim]archive: {cov['days']} session(s), "
+                  f"{cov['rows']:,} rows{span}[/]")
+    if cov["days"] < MIN_BACKTEST_SESSIONS:
+        console.print(f"[dim]a usable options backtest needs "
+                      f"~{MIN_BACKTEST_SESSIONS}+ sessions; "
+                      f"{MIN_BACKTEST_SESSIONS - cov['days']} to go. "
+                      f"Cron this daily.[/]")
+    return 0 if captured else 1
 
 
 def cmd_kite_master(args) -> int:
@@ -843,7 +920,7 @@ def cmd_breadth(args) -> int:
     scen = build_scenarios(setup.composite.direction.value,
                            setup.composite.score, snap, flags,
                            event_risk=bool(args.event))
-    render_scenarios(scen, console)
+    render_scenarios(scen, console, setup.composite.direction.value)
     console.print(f"\n[bold]EOD read:[/] {narrative(scen, snap, setup.composite.direction.value, ctx.get('nifty_ret_1d'))}")
     return 0
 
@@ -928,6 +1005,8 @@ def main() -> int:
     ov.add_argument("--period", default="2y")
     ov.add_argument("--no-breadth", action="store_true",
                     help="skip constituent breadth + scenarios (breadth on by default)")
+    ov.add_argument("--journal", action="store_true",
+                    help="record this run (dry-run by default, like tonight)")
     ov.add_argument("--event", action="append", default=[],
                     help="known scheduled risk tonight, e.g. "
                          "--event 'US-Iran sanctions' (repeatable). "
@@ -1015,6 +1094,15 @@ def main() -> int:
     kl.add_argument("--logout", action="store_true",
                     help="delete the stored session")
 
+    ac = sub.add_parser("archive-chain",
+                        help="persist tonight's option chain for future backtests")
+    ac.add_argument("--underlying", default="NIFTY",
+                    help="NIFTY (default) or an NSE stock symbol")
+    ac.add_argument("--expiries", type=int, default=1,
+                    help="how many expiries to capture, nearest first "
+                         "(>1 gives term structure)")
+    ac.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"))
+
     km = sub.add_parser("kite-master", help="Refresh the Kite instrument master + show counts")
     km.add_argument("--exchange", action="append", default=[],
                     help="limit to exchange (repeatable; default NSE+NFO)")
@@ -1045,6 +1133,7 @@ def main() -> int:
         "breadth-backtest": cmd_breadth_backtest,
         "tonight": cmd_tonight,
         "stock-overnight": cmd_stock_overnight,
+        "archive-chain": cmd_archive_chain,
         "kite-login": cmd_kite_login,
         "kite-master": cmd_kite_master,
         "kite-parity": cmd_kite_parity,

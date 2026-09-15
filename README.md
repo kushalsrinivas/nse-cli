@@ -27,10 +27,12 @@ with a session — see below).
 | `model_cli.py stock-overnight [--symbol X] [--lots N]` | Naked CE/PE overnight per stock, ranked GO table (separate journal) |
 | `model_cli.py evaluate / backtest / optimize / journal` | Score now · walk-forward report · fit weights · review setups |
 | `model_cli.py breadth / breadth-backtest` | Constituent snapshot · NIFTY-only vs NIFTY+breadth ablation |
+| `model_cli.py archive-chain [--expiries N]` | Persist tonight's option chain — **cron this at ~15:25 IST** |
 | `model_cli.py kite-login / kite-master / kite-parity / kite-live` | Kite session · instrument master · source parity · WS streaming |
 | `main.py -oj` , `--settle-overnight ID PX` , `--settle-confluence ID PX` , `--settle-stock ID PX` | Journals + manual settlement |
 
-All decision commands are **dry-run by default** (`--journal` records).
+All decision commands — `tonight`, `overnight`, `confluence` — are
+**dry-run by default** (`--journal` records).
 `tonight` never lifts a sub-threshold setup on breadth alone, and breadth
 filters can only veto, never create, a trade.
 
@@ -60,7 +62,7 @@ data/kite/* ───┘   indicators    regime/composite   (workflows:        p
 ## Testing & lint
 
 ```bash
-python -m unittest discover -s tests          # 141 tests, network-free
+python -m unittest discover -s tests          # 215 tests, network-free
 python -m ruff check .                        # curated rules, see pyproject.toml
 ```
 
@@ -76,10 +78,26 @@ fetchers is the degrade-don't-crash design.
 
 ## Known limitations (honest)
 
-- Backtests simulate the underlying (ATR stops), not option fills; no
-  slippage/fees in most paths — paper-trade before trusting anything.
+**The base model has no measured directional edge.** Audited against five
+years of its own target: 59.7% hit rate on the overnight gap versus 62.2%
+for always predicting "up", and the composite score is flat against outcome
+(65-70 scores hit 56.2%, 80+ hit 58.2%). The cohort probability engine
+scores worse on Brier than the unconditional gap rate, and its magnitude
+forecast is negatively correlated with the realized gap. Treat every
+directional number the engine prints as unvalidated. See `docs/AUDIT.md`.
+
+- **No historical option chain exists**, so the EV engine cannot be
+  validated at all. `archive-chain` starts fixing this from today forward;
+  it needs ~40 sessions before an options backtest is worth running.
+- Backtests simulate the underlying (ATR stops), not option fills — and
+  resolve same-bar stop/target optimistically, so win rates are flattered.
 - NIFTY volume feeds are unreliable (`^NSEI` ships none; index WS packets
-  have none) — volume gates use proxies, disclosed where applied.
-- Learned weights and single-leg pricing carry documented biases; see docs.
+  have none) — volume gates use proxies, disclosed where applied. The
+  thin-volume gate has no measured relationship to next-day outcomes.
+- The forecast ignores the overnight global session, which is the dominant
+  driver of the gap (S&P overnight return: r = +0.53, 69.6% sign accuracy).
+- No learned weights ship. The previous artefact was fitted on its own
+  validation split and recorded −0.451 R held-out expectancy; it was
+  removed, and `optimize` now refuses to persist a non-positive fit.
 
 MIT — see LICENSE.

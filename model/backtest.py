@@ -257,7 +257,12 @@ def calibrate_win_probability(report: BacktestReport) -> bool:
 
 def optimize_weights(candles, settings=SETTINGS, train_frac: float = 0.7,
                      rounds: int = 4) -> tuple[WeightSet | None, dict]:
-    """Coordinate-ascent on baseline weights; validate strictly out-of-sample."""
+    """Coordinate-ascent on the TRAIN split; validate strictly out-of-sample.
+
+    `valid_c` is never touched during the search, so `meta["validation_summary"]`
+    is a genuine held-out number. Callers must refuse to persist a fit whose
+    validation expectancy is not positive.
+    """
     candles_list = list(candles)
     split = int(len(candles_list) * train_frac)
     train_c, valid_c = candles_list[:split], candles_list[split:]
@@ -273,16 +278,20 @@ def optimize_weights(candles, settings=SETTINGS, train_frac: float = 0.7,
         s = bt.summary()
         return s.get("expectancy_r", -9) if s.get("trades", 0) >= 8 else -9.0
 
-    baseline_valid = eval_with(current, valid_c)
+    # The search objective MUST be the training split. This previously
+    # scored every trial on `valid_c` and then reported a backtest on that
+    # same data as "out-of-sample" — the validation number was in-sample by
+    # construction, and the training split was never used to fit anything.
+    baseline_train = eval_with(current, train_c)
     for _ in range(rounds):
         improved = False
         for g in groups:
             for factor in (1.25, 0.80, 1.5, 0.67):
                 trial = dict(current)
                 trial[g] = current[g] * factor
-                score = eval_with(trial, valid_c)
-                if score > baseline_valid + 0.02:
-                    current, baseline_valid = trial, score
+                score = eval_with(trial, train_c)
+                if score > baseline_train + 0.02:
+                    current, baseline_train = trial, score
                     improved = True
         if not improved:
             break

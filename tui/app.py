@@ -768,8 +768,9 @@ class NiftyTerminal(App):
             direction="long",
             entry_price=premium,
             quantity=lots * lot_size,
-            stop_loss=round(premium * (1 - SETTINGS.default_stop_pct / 100), 2),
-            target=round(premium * (1 + SETTINGS.default_stop_pct / 200), 2),
+            stop_loss=round(premium * (1 - SETTINGS.default_stop_frac), 2),
+            target=round(premium * (1 + SETTINGS.default_stop_frac
+                                    * SETTINGS.target_multiplier), 2),
             strategy="option_buy",
             entry_reason=f"manual option entry ({lots} lot{'s' if lots != 1 else ''})",
             states=self._current_states(),

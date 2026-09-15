@@ -165,13 +165,37 @@ class OvernightJournal:
     # -- CRUD ------------------------------------------------------------------
 
     def add(self, rec: OvernightRunRecord) -> OvernightRunRecord:
-        if not rec.run_id:
-            now_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-            rec.run_id = f"ON-{now_str}-{uuid.uuid4().hex[:4].upper()}"
+        """Record one evening's decision.
+
+        Idempotent per (trade_date, engine_version): re-running the engine
+        the same evening REPLACES the pending row rather than appending a
+        new one. Without this the journal accumulated one row per
+        invocation — 2026-09-10 held nine — which makes any hit-rate or
+        expectancy computed over it meaningless. Settled rows (an outcome
+        other than PENDING) are never overwritten; a re-run after
+        settlement appends, so the settled history stays intact.
+        """
         if not rec.created_at:
             rec.created_at = datetime.now().isoformat(timespec="seconds")
         if not rec.trade_date:
             rec.trade_date = rec.timestamp[:10] if rec.timestamp else datetime.now().strftime("%Y-%m-%d")
+
+        existing = self.conn.execute(
+            "SELECT id, run_id FROM overnight_trade_journal "
+            "WHERE trade_date=? AND engine_version=? AND outcome='PENDING' "
+            "ORDER BY id DESC LIMIT 1",
+            (rec.trade_date, rec.engine_version),
+        ).fetchone()
+
+        if existing is not None:
+            rec.run_id = rec.run_id or existing["run_id"]
+            superseded = replace(rec, id=existing["id"], run_id=existing["run_id"])
+            self.update(superseded)
+            return superseded
+
+        if not rec.run_id:
+            now_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+            rec.run_id = f"ON-{now_str}-{uuid.uuid4().hex[:4].upper()}"
 
         cols = self._cols()
         values = [getattr(rec, c) for c in cols]

@@ -61,8 +61,16 @@ class Settings:
     near_expiry_days: int = 2             # expiry-day risk multiplier window
     near_expiry_risk_scale: float = 0.5   # halve risk within N days of expiry
     min_rr_ratio: float = 1.5             # reject setups below this reward:risk
-    default_stop_pct: float = 0.30        # premium stop % when no S/R level applies
+    # Premium stop as a FRACTION of entry premium (0.30 = 30%). Named
+    # `_frac`, never `_pct`: every call site used to divide this by 100 a
+    # second time, which shrank the stop to 0.3% and inflated position size
+    # ~100x. Do not reintroduce a /100 on this value.
+    default_stop_frac: float = 0.30
     target_multiplier: float = 2.0        # target = stop distance × this
+    # Hard ceiling on premium actually deployed, as a fraction of equity.
+    # Backstop for any future stop-distance error: risk-based sizing alone
+    # cannot bound outlay when the stop is tight.
+    max_premium_deploy_pct: float = 0.25
 
     # --- Overnight strategy ---
     min_bucket_n: int = 10                # minimum historical sample for a GO

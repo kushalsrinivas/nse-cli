@@ -97,17 +97,29 @@ class RiskManager:
                                 blocked_reason="No remaining risk budget")
 
         loss_per_lot = risk_per_share * s.lot_size
-        if premium * s.lot_size > st.equity:       # one lot unaffordable
+        premium_per_lot = premium * s.lot_size
+        if premium_per_lot > st.equity:            # one lot unaffordable
             return SizingResult(allowed=False,
                                 blocked_reason="Premium exceeds capital for one lot")
 
-        contracts = int(max_risk // loss_per_lot)
+        by_risk = int(max_risk // loss_per_lot)
+
+        # Notional backstop. Risk-based sizing alone cannot bound the cash
+        # actually deployed: as the stop distance shrinks, loss_per_lot goes
+        # to zero and the lot count diverges. Cap lots so total premium
+        # stays inside the deploy ceiling regardless of stop geometry.
+        deploy_cap = st.equity * s.max_premium_deploy_pct
+        by_deploy = int(deploy_cap // premium_per_lot)
+        contracts = min(by_risk, by_deploy)
+
         if contracts < 1:
-            return SizingResult(
-                allowed=False,
-                blocked_reason=(f"Risk budget ₹{max_risk:,.0f} too small for "
-                                f"₹{loss_per_lot:,.0f}/lot stop distance"),
-            )
+            reason = (f"Risk budget ₹{max_risk:,.0f} too small for "
+                      f"₹{loss_per_lot:,.0f}/lot stop distance")
+            if by_deploy < 1:
+                reason = (f"One lot costs ₹{premium_per_lot:,.0f}, above the "
+                          f"₹{deploy_cap:,.0f} deploy ceiling "
+                          f"({s.max_premium_deploy_pct:.0%} of equity)")
+            return SizingResult(allowed=False, blocked_reason=reason)
 
         actual_risk = contracts * loss_per_lot
         return SizingResult(
@@ -116,7 +128,11 @@ class RiskManager:
             max_risk_rupees=round(actual_risk, 2),
             contracts=contracts,
             loss_per_lot=round(loss_per_lot, 2),
-            exposure_used={"rr": round(rr, 2), "dte": dte},
+            exposure_used={
+                "rr": round(rr, 2), "dte": dte,
+                "premium_deployed": round(contracts * premium_per_lot, 2),
+                "bound_by": "deploy_ceiling" if by_deploy < by_risk else "risk_budget",
+            },
         )
 
     # -- lifecycle hooks the execution layer calls --------------------------

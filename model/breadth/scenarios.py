@@ -147,37 +147,70 @@ def build_scenarios(
     return ScenarioSet(probs=probs, posture=posture, evidence=evidence)
 
 
-def structure_view(scen: ScenarioSet) -> dict[str, str]:
+def structure_view(scen: ScenarioSet, direction: str = "neutral") -> dict[str, str]:
     """Map scenario probabilities to the overnight structure menu.
 
     Returns a structure -> one-line assessment mapping for CE / PE /
     defined-risk bull / defined-risk bear / hedged / none. This is a
     screen, not a price: the EV engine still has to clear cost/theta/IV.
+
+    `direction` is the composite call the scenarios were built around.
+    The scenario names are RELATIVE to it — "A_continuation" means the
+    composite direction continues, so on a bearish call the continuation
+    trade is a PE, not a CE. Omitting the direction used to return a
+    hard-coded bullish menu on every high-continuation night, which
+    recommended calls into a high-confidence breakdown.
     """
     p_cont, p_adv = scen.continuation_prob, scen.adverse_gap_prob
     p_chop, p_event = scen.chop_prob, scen.probs.get("E_event_vol", 0)
+    bullish = direction == "bullish"
+    bearish = direction == "bearish"
+
+    def menu(with_view: str, against_view: str, hedged: str, none: str) -> dict[str, str]:
+        """Assign with/against-view verdicts to concrete structures."""
+        if bullish:
+            naked_w, naked_a, spread_w, spread_a = "CE", "PE", "bull_spread", "bear_spread"
+        elif bearish:
+            naked_w, naked_a, spread_w, spread_a = "PE", "CE", "bear_spread", "bull_spread"
+        else:
+            no_dir = "avoid — no directional call to express"
+            return {"CE": no_dir, "PE": no_dir, "bull_spread": no_dir,
+                    "bear_spread": no_dir, "hedged": hedged,
+                    "none": "preferred — neutral posture"}
+        spread_w_txt = (with_view.replace("naked ", "")
+                        if "naked" in with_view else with_view)
+        return {naked_w: with_view, naked_a: against_view,
+                spread_w: spread_w_txt, spread_a: against_view,
+                "hedged": hedged, "none": none}
+
     if p_event >= 0.25:
         base = "no naked overnight exposure; event vol dominates"
         return {"CE": "avoid — " + base, "PE": "avoid — " + base,
                 "bull_spread": "avoid — " + base, "bear_spread": "avoid — " + base,
                 "hedged": "only hedged if system EV clears", "none": "preferred"}
     if p_cont >= 0.34 and p_adv < 0.30:
-        return {"CE": "candidate — continuation edge", "PE": "avoid",
-                "bull_spread": "preferred over naked CE (defined risk)",
-                "bear_spread": "avoid", "hedged": "unnecessary",
-                "none": "only if EV fails on cost/theta"}
+        return menu(
+            with_view=f"candidate — continuation edge (P={p_cont:.0%})",
+            against_view="avoid — fights the continuation call",
+            hedged="unnecessary",
+            none="only if EV fails on cost/theta")
     if p_adv >= 0.38:
-        return {"CE": "avoid", "PE": "candidate if bearish posture",
-                "bull_spread": "avoid", "bear_spread": "candidate (defined risk)",
-                "hedged": "consider", "none": "reasonable default"}
+        # An adverse gap is a gap AGAINST the composite direction, so the
+        # structure that profits is the against-view one.
+        return menu(
+            with_view="avoid — adverse-gap odds dominate",
+            against_view=f"candidate (defined risk) — adverse gap P={p_adv:.0%}",
+            hedged="consider",
+            none="reasonable default")
     if p_chop >= 0.52:
         return {"CE": "avoid — chop bleeds theta", "PE": "avoid — chop bleeds theta",
                 "bull_spread": "avoid", "bear_spread": "avoid",
                 "hedged": "avoid", "none": "preferred — no edge in chop"}
-    return {"CE": "marginal — needs EV confirmation",
-            "PE": "marginal — needs EV confirmation",
-            "bull_spread": "marginal", "bear_spread": "marginal",
-            "hedged": "consider", "none": "default unless EV clears"}
+    return menu(
+        with_view="marginal — needs EV confirmation",
+        against_view="marginal — needs EV confirmation",
+        hedged="consider",
+        none="default unless EV clears")
 
 
 def narrative(

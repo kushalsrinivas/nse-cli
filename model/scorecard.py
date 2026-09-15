@@ -82,7 +82,8 @@ def render_setup(setup: TradeSetup, console: Console | None = None) -> None:
         ch = setup.chosen
         detail.add_row("Contract", f"[bold]{ch.symbol}[/]  ({ch.dte}d)")
         detail.add_row("Entry", f"₹{ch.premium:,.2f}")
-        detail.add_row("Stop", f"₹{ch.stop_price:,.2f}  [dim](−{SETTINGS.default_stop_pct:.2f}%)[/]")
+        detail.add_row("Stop", f"₹{ch.stop_price:,.2f}  "
+                               f"[dim](−{SETTINGS.default_stop_frac * 100:.0f}%)[/]")
         detail.add_row("Target", f"₹{ch.target_price:,.2f}")
         detail.add_row(
             "Greeks",

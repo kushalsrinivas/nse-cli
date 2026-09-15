@@ -100,7 +100,7 @@ def evaluate(candles=None, chain=None, journal: SetupJournal | None = None,
                 classify,
                 estimate_win_probability,
             )
-            new_score = adj.adjusted_score
+            new_score = max(0.0, min(100.0, adj.adjusted_score))
             composite = replace(
                 composite,
                 score=new_score,
