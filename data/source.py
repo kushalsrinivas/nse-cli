@@ -85,8 +85,15 @@ def ensure_master(rest=None, store=None, max_age_hours: int = _MASTER_MAX_AGE_HO
     try:
         dates = store.as_of_dates()
         if dates:
-            latest = datetime.strptime(dates[0], "%Y-%m-%d")
-            fresh = (datetime.now() - latest) < timedelta(hours=max_age_hours)
+            # The stamp is a DATE, so parsing it gives midnight. Comparing
+            # that to `now` made a master refreshed this morning look
+            # `max_age_hours` old once the clock passed 20:00, and the
+            # master was refetched every evening. Compare dates instead:
+            # today's master is fresh all day, and yesterday's stays usable
+            # through the early morning before today's is published.
+            latest = datetime.strptime(dates[0], "%Y-%m-%d").date()
+            cutoff = (datetime.now() - timedelta(hours=max_age_hours)).date()
+            fresh = latest >= cutoff
     except Exception:
         fresh = False
     if not fresh:

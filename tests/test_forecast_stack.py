@@ -34,6 +34,29 @@ def _candles(n=900, seed=3):
     return out
 
 
+def _weekly(days: int = 7) -> str:
+    return (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _chain(spot: float, expiry: str, strikes, iv: float = 13.5):
+    """Chain priced with the repo's own Black-Scholes, so deltas are real."""
+    from data.options import ChainRow, OptionChain, OptionLeg
+    from model.options_ev import bs_price
+    dte = max((datetime.strptime(expiry, "%Y-%m-%d").date()
+               - datetime.now().date()).days, 0)
+
+    def leg(k, is_call):
+        px = max(round(bs_price(spot, k, dte, iv / 100, is_call), 2), 0.5)
+        return OptionLeg(strike=k, expiry=expiry, ltp=px, volume=5_000,
+                         open_interest=400_000, change_in_oi=1_000, iv=iv,
+                         bid=round(px - 0.5, 2), ask=round(px + 0.5, 2))
+
+    rows = tuple(ChainRow(strike=k, call=leg(k, True), put=leg(k, False))
+                 for k in strikes)
+    return OptionChain(underlying_value=spot, expiries=(expiry,), rows=rows,
+                       source="test", fetched_at=datetime(2026, 9, 15, 15, 25))
+
+
 class TestFeatureLegality(unittest.TestCase):
     """A feature must be observable when the decision is actually made."""
 
@@ -348,3 +371,141 @@ class TestDecisionLayer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPositionParsing(unittest.TestCase):
+    def test_parses_long_and_short_legs(self):
+        from model.forecast.position import parse_leg
+        long_ce = parse_leg("23100CE@223.55")
+        self.assertEqual((long_ce.strike, long_ce.is_call, long_ce.qty), (23100.0, True, 1))
+        self.assertAlmostEqual(long_ce.entry_price, 223.55)
+        short_ce = parse_leg("-23300CE@120.1")
+        self.assertEqual(short_ce.qty, -1)
+        self.assertFalse(parse_leg("23000pe@131.45").is_call)
+
+    def test_tolerates_whitespace_and_case(self):
+        from model.forecast.position import parse_leg
+        self.assertEqual(parse_leg(" 23100 ce @ 223.55 ").strike, 23100.0)
+
+    def test_rejects_unreadable_specs_with_an_example(self):
+        from model.forecast.position import PositionSpecError, parse_leg
+        for bad in ("garbage", "23100CE", "@223", "23100XX@10"):
+            with self.assertRaises(PositionSpecError) as ctx:
+                parse_leg(bad)
+            self.assertIn("23100CE@223.55", str(ctx.exception))
+
+
+class TestEntryIsMarkedAtWhatYouPaid(unittest.TestCase):
+    """A mark at chain IV injects phantom P&L the position never lost."""
+
+    def test_implied_vol_reprices_the_entry_exactly(self):
+        from model.forecast.position import implied_vol
+        from model.options_ev import bs_price
+        iv = implied_vol(223.55, 23_118.6, 23_100.0, 7, True)
+        self.assertIsNotNone(iv)
+        self.assertAlmostEqual(bs_price(23_118.6, 23_100.0, 7, iv, True),
+                               223.55, places=2)
+
+    def test_implied_vol_declines_prices_below_intrinsic(self):
+        from model.forecast.position import implied_vol
+        self.assertIsNone(implied_vol(50.0, 23_500.0, 23_000.0, 7, True))
+        self.assertIsNone(implied_vol(0.0, 23_118.0, 23_100.0, 7, True))
+
+    def test_attach_ivs_calibrates_to_the_fill_not_the_chain(self):
+        from model.forecast.position import attach_ivs, parse_leg
+        from model.options_ev import bs_price
+        chain = _chain(23_118.6, _weekly(7), [23_100.0 + 50 * i for i in range(-4, 5)])
+        leg = attach_ivs([parse_leg("23100CE@223.55")], chain, 23_118.6, 7)[0]
+        self.assertAlmostEqual(
+            bs_price(23_118.6, 23_100.0, 7, leg.iv, True), 223.55, places=1)
+
+    def test_falls_back_when_the_price_cannot_be_inverted(self):
+        from model.forecast.position import attach_ivs, parse_leg
+        leg = attach_ivs([parse_leg("23000CE@1.0")], None, 23_500.0, 7)[0]
+        self.assertGreater(leg.iv, 0)          # kept the default, did not crash
+
+
+class TestMeasuredIvChange(unittest.TestCase):
+    """The audited engine hard-coded Friday at -0.8; measured it is +0.51."""
+
+    def test_friday_entry_is_positive_not_negative(self):
+        from model.forecast.position import MEASURED_IV_CHANGE
+        self.assertGreater(MEASURED_IV_CHANGE[4], 0)
+        for weekday in (0, 1, 2, 3):
+            self.assertLess(MEASURED_IV_CHANGE[weekday], 0)
+
+    def test_measures_from_history_when_given_one(self):
+        from model.forecast.position import measure_overnight_iv_change
+        idx = pd.date_range("2022-01-03", periods=600, freq="B")
+        series = pd.Series(np.linspace(12, 12, 600), index=idx)
+        series.iloc[:] = 12.0
+        mean, sd, note = measure_overnight_iv_change(series, entry_weekday=0)
+        self.assertIn("measured", note)
+        self.assertAlmostEqual(mean, 0.0, places=6)
+        self.assertGreaterEqual(sd, 0.0)
+
+    def test_falls_back_to_the_measured_table(self):
+        from model.forecast.position import measure_overnight_iv_change
+        mean, _sd, note = measure_overnight_iv_change(None, entry_weekday=4)
+        self.assertIn("1,229", note)
+        self.assertGreater(mean, 0)
+
+
+class TestExitOutlook(unittest.TestCase):
+    def _dists(self, gap_loc=0.0, gap_scale=0.45, sess_scale=0.55):
+        from model.forecast.distribution import EmpiricalShape, build_distribution
+        shape = EmpiricalShape.normal(3000)
+        return (build_distribution(gap_scale, "gap", shape, location_pct=gap_loc),
+                build_distribution(sess_scale, "session", shape))
+
+    def _outlook(self, spec="23100CE@223.55", **kw):
+        from model.forecast.position import attach_ivs, evaluate_exit, parse_leg
+        chain = _chain(23_118.6, _weekly(7), [23_100.0 + 50 * i for i in range(-6, 7)])
+        legs = attach_ivs([parse_leg(spec)], chain, 23_118.6, 7)
+        gap, sess = self._dists(**kw)
+        return evaluate_exit(legs, 23_118.6, gap, sess, 7, lots=1, lot_size=75)
+
+    def test_reports_both_exits_and_a_recommendation(self):
+        o = self._outlook()
+        self.assertIn(o.recommendation.split()[0], {"HOLD", "EXIT", "TOO"})
+        self.assertEqual(set(o.quantiles_at_open), {"p10", "p25", "p50", "p75", "p90"})
+        self.assertTrue(0.0 <= o.p_profit_at_open <= 1.0)
+
+    def test_quantiles_are_ordered(self):
+        o = self._outlook()
+        for q in (o.quantiles_at_open, o.quantiles_at_close):
+            vals = [q[k] for k in ("p10", "p25", "p50", "p75", "p90")]
+            self.assertEqual(vals, sorted(vals))
+
+    def test_holding_widens_the_outcome_spread(self):
+        """The session adds variance; that must show up in the tails."""
+        o = self._outlook()
+        open_spread = o.quantiles_at_open["p90"] - o.quantiles_at_open["p10"]
+        close_spread = o.quantiles_at_close["p90"] - o.quantiles_at_close["p10"]
+        self.assertGreater(close_spread, open_spread)
+
+    def test_a_negligible_difference_is_called_too_close(self):
+        o = self._outlook()
+        if abs(o.hold_gains) < max(o.exit_friction, 0.02 * abs(o.entry_cost)):
+            self.assertTrue(o.recommendation.startswith("TOO CLOSE"))
+            self.assertTrue(any("not a real difference" in r for r in o.rationale))
+
+    def test_bullish_gap_forecast_improves_a_call(self):
+        flat = self._outlook(gap_loc=0.0)
+        up = self._outlook(gap_loc=0.8)
+        self.assertGreater(up.ev_at_open, flat.ev_at_open)
+        self.assertGreater(up.p_profit_at_open, flat.p_profit_at_open)
+
+    def test_short_leg_flips_the_sign_of_the_entry_cost(self):
+        long_leg = self._outlook("23100CE@223.55")
+        short_leg = self._outlook("-23100CE@223.55")
+        self.assertGreater(long_leg.entry_cost, 0)
+        self.assertLess(short_leg.entry_cost, 0)
+
+    def test_p_profit_direction_word_matches_the_numbers(self):
+        o = self._outlook()
+        line = next(r for r in o.rationale if "P(profit)" in r)
+        if o.p_profit_at_close > o.p_profit_at_open:
+            self.assertIn("rises", line)
+        elif o.p_profit_at_close < o.p_profit_at_open:
+            self.assertIn("falls", line)

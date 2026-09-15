@@ -28,6 +28,7 @@ with a session — see below).
 | `model_cli.py evaluate / backtest / optimize / journal` | Score now · walk-forward report · fit weights · review setups |
 | `model_cli.py breadth / breadth-backtest` | Constituent snapshot · NIFTY-only vs NIFTY+breadth ablation |
 | `model_cli.py premarket` | 08:30 IST pre-market card: gap forecast, distribution, levels, structures |
+| `model_cli.py premarket --exit 23100CE@223.55` | Price a position you already hold: exit at the open, or hold? |
 | `model_cli.py forecast-eval` | Score the forecast stack + the incumbent engine on the harness |
 | `model_cli.py archive-chain [--expiries N]` | Persist tonight's option chain — **cron this at ~15:25 IST** |
 | `model_cli.py kite-login / kite-master / kite-parity / kite-live` | Kite session · instrument master · source parity · WS streaming |

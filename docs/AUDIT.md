@@ -192,3 +192,47 @@ without being hard-coded there.
   none of it is capturable by an intraday entry.
 - GIFT Nifty, the most direct read of the NIFTY open, is still not fetched.
   It would sharpen the gap forecast further but cannot make it tradeable.
+
+---
+
+## Follow-on: `premarket --exit` — closing the loop on the overnight trade
+
+The measured edge (PREOPEN gap, AUC 0.748) cannot be used to *enter* an
+overnight trade, because at 15:25 the global session has not happened. It
+can be used to *exit* one you already hold. `--exit` marks the position
+across the gap distribution and asks the only question left at 08:30:
+
+    model_cli.py premarket --exit 23100CE@223.55 --expiry 2026-09-22
+    model_cli.py premarket --exit 23100CE@223.55 --exit -23300CE@120.10
+
+Two corrections came out of building it.
+
+**Overnight IV change is measured, not assumed.** The audited engine
+hard-coded a Friday hold at **-0.8** VIX points. Measured over 1,229
+sessions the Friday-to-Monday change is **+0.507** (95% CI [+0.363,
++0.651]) — the opposite sign, on the case where the assumption mattered
+most. Weekday entries run -0.08 to -0.17, and the unconditional mean is
+indistinguishable from zero (95% CI [-0.055, +0.054]). Caveat stated in
+the code: VIX is close-to-close, so this spans the next session rather than
+only the move to the open — an upper bound, and the only proxy this repo
+has data for.
+
+**The entry must be marked at what you paid.** Marking a 23100CE filled at
+223.55 using the chain's quoted IV of 14.93% reprices it at 215.12 — an
+instant -₹632/lot the position never lost. `attach_ivs` now solves for the
+vol implied by the fill, so the only P&L drivers left are the move, the
+decay and the IV change.
+
+The verdict carries a materiality band: when holding changes expected value
+by less than friction plus forecast error, it says **TOO CLOSE TO CALL —
+take the open** rather than manufacturing a decision from noise. On the
+worked example the difference was ₹64 on a ₹16,766 position.
+
+## Also fixed here (pre-existing, unrelated to the audit)
+
+`ensure_master` compared a DATE stamp parsed to midnight against `now`, so
+after 20:00 local a master refreshed that morning read as 20 hours old and
+was refetched every evening. `tests/test_source.py` failed for the same
+reason whenever the suite ran late. Now compares dates: today's master is
+fresh all day, yesterday's stays usable through the early morning before
+today's is published.

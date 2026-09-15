@@ -400,6 +400,52 @@ def cmd_premarket(args) -> int:
     out = build_premarket(result.candles, chain=chain, macro=macro,
                           vix_level=vix)
     render_premarket(out, console)
+
+    if args.exit:
+        from model.forecast.position import (
+            PositionSpecError,
+            attach_ivs,
+            evaluate_exit,
+            measure_overnight_iv_change,
+            parse_leg,
+            render_exit,
+        )
+        from model.options_ev import days_to_expiry
+        try:
+            legs = [parse_leg(spec) for spec in args.exit]
+        except PositionSpecError as exc:
+            console.print(f"[red]{exc}[/]")
+            return 1
+        expiry = args.expiry or (chain.expiries[0] if chain
+                                 and chain.expiries else "")
+        dte = days_to_expiry(expiry) if expiry else 7
+        if not expiry:
+            console.print("[yellow]no expiry known — assuming 7 DTE; pass "
+                          "--expiry YYYY-MM-DD to be exact[/]")
+        legs = attach_ivs(legs, chain, out.spot, dte)
+
+        entry_wd = result.candles[-1].timestamp.weekday()
+        vix_hist = None
+        if macro and "indiavix" in macro:
+            vix_hist = macro["indiavix"]
+        iv_chg, _iv_sd, iv_note = measure_overnight_iv_change(vix_hist, entry_wd)
+
+        # The gap distribution is what prices an exit at the open; the
+        # session distribution is only needed to price holding past it.
+        from model.forecast.distribution import build_distribution
+        gap_loc = out.gap.expected_pct if out.gap and out.gap.available else 0.0
+        gap_scale = (out.gap.sigma_pct if out.gap and out.gap.available
+                     else out.vol.sigma_gap_pct)
+        gap_dist = build_distribution(
+            gap_scale, "gap", out.decision.market.distribution.shape,
+            location_pct=gap_loc,
+            location_source="gap model (AUC 0.748 out of sample)")
+
+        console.print()
+        render_exit(evaluate_exit(
+            legs, out.spot, gap_dist, out.decision.market.distribution, dte,
+            lots=args.lots, lot_size=SETTINGS.lot_size,
+            iv_change_pts=iv_chg, iv_change_note=iv_note), console)
     return 0
 
 
@@ -1245,6 +1291,14 @@ def main() -> int:
     pm.add_argument("--period", default="5y",
                     help="history for fitting the gap model and the shape")
     pm.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"))
+    pm.add_argument("--exit", action="append", default=[], metavar="LEG",
+                    help="price a position you already hold, e.g. "
+                         "--exit 23100CE@223.55 (repeat for a spread; "
+                         "prefix '-' for a short leg)")
+    pm.add_argument("--lots", type=int, default=1,
+                    help="lots held (with --exit)")
+    pm.add_argument("--expiry", default=None,
+                    help="YYYY-MM-DD of the position's expiry (with --exit)")
 
     fe = sub.add_parser("forecast-eval",
                         help="score the forecast stack and the incumbent engine")
