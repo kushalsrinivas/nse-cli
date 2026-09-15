@@ -67,3 +67,128 @@ Build the evaluation harness (purged walk-forward, named baselines,
 Brier / log-loss / pinball / calibration, block-bootstrap intervals), then
 run the *existing* engine through it and publish the result as the standing
 baseline. Nothing after that ships without beating a named number.
+
+---
+
+# Stages 1-6 — the forecast stack, and what the evidence actually says
+
+Stage 0 fixed defects. Stages 1-6 asked the prior question: **is there
+anything to forecast?** The answer changed the product.
+
+## Stage 1 — the harness (`model/forecast/evaluate.py`)
+
+Purged, embargoed walk-forward; named baselines; block-bootstrap intervals
+on every paired loss difference. A model "ships" only when the 95% CI on
+the difference excludes zero. Run it with:
+
+    model_cli.py forecast-eval
+
+It scores the incumbent engine and the new stack through identical folds,
+so any later claim of improvement is like-for-like.
+
+## The decision-point problem
+
+The single most important structural finding, and it is not a bug — it is
+a property of the trade:
+
+| Decision point | When | Global session known? | Tradeable target |
+|---|---|---|---|
+| **EOD** | 15:25 IST | **No** — tonight's US session hasn't happened | gap into tomorrow |
+| **PREOPEN** | 08:30 IST | **Yes** — Wall St closed ~01:30 | today's session (you enter at the 09:15 open) |
+
+The overnight gap is highly forecastable *from the global session*, but
+only at 08:30 — by which time you can no longer trade it. At 15:25, when
+`overnight` actually decides, that information does not exist yet.
+`features.py` makes `decision_point` a required argument for this reason
+and lags the global block an extra day at EOD.
+
+## Stage 2-3 — direction and distribution
+
+Feature sets pre-registered by hypothesis, `l2=1.0` fixed in advance, all
+results reported:
+
+| Decision point | Target | Tradeable | Best Brier | Baseline | AUC | Ships? |
+|---|---|---|---|---|---|---|
+| EOD | gap direction | **yes** | 0.2536 | 0.2479 | 0.551 | **no** |
+| PREOPEN | gap direction | no (context) | **0.2104** | 0.2479 | **0.748** | **YES** |
+| PREOPEN | session direction | **yes** | 0.2556 | 0.2494 | 0.539 | **no** |
+| PREOPEN | session range | yes, via vol | MAE 0.3348 | 0.3826 | r +0.347 | **YES** |
+
+Quantile regression on either tradeable target failed to beat unconditional
+quantiles (pinball delta +0.002 to +0.003, CIs straddling zero). So the
+conditional *scale* is forecastable and the conditional *location* is not.
+
+## Stage 4 — the volatility edge
+
+| Question | Answer |
+|---|---|
+| Is there a volatility risk premium? | **Yes.** Implied/realised = **1.190x**, 95% CI on the difference [+0.107, +0.194], n=1,221. P(\|move\| > 1 implied sigma) = **0.218** against 0.317 if fairly priced. |
+| Does our range forecast beat trailing realised vol? | **Yes** — MAE 0.335 vs 0.383, CI excludes zero. |
+| Does it beat India VIX? | **No** — delta -0.004, CI [-0.022, +0.014]. VIX already knows what our features know. |
+| Does (forecast - implied) predict the vol trade's P&L? | **No** — corr -0.028, quintiles non-monotonic. |
+
+Horizon discipline matters here and nearly caught us out a second time: an
+early run compared VIX against a Parkinson range estimate, which covers
+only the intraday session and excludes the gap, and produced a fake 1.89x
+premium. Matched to close-to-close it is 1.19x. This is the same class of
+error as F-09.
+
+## Stage 6 — ablations (run early, because they decide what to build)
+
+- **Nonlinearity.** Gradient-boosted stumps vs ridge logistic vs constant,
+  both decision points: no configuration beat the constant. CIs straddle
+  zero throughout.
+- **Regime conditioning.** Twelve slices (vol, trend, ADX, gap size). The
+  best — ADX mid-tercile, AUC 0.634 — is what one expects to find by
+  chance when examining twelve slices. Not pursued without pre-registration
+  and confirmation on a different period.
+
+## What this means
+
+**There is no directional edge at either tradeable decision point**, under
+any model class tested, in any regime tested. The old engine's composite
+score claims 70.4% at scores of 80+ and delivers 61.6%.
+
+**There is one robust edge, and it is short volatility.** Options have run
+~19% rich over five years. Every long-premium structure starts that far
+behind. The audited engine only ever bought premium.
+
+## What was built (`model/forecast/`)
+
+    features.py       L1  decision-point-aware feature rows
+    evaluate.py       L8  the harness, built first
+    models.py             ridge logistic / ridge / quantile / HAR / GBM, numpy only
+    volatility.py     L2  VIX-anchored, every quantity carries its horizon
+    distribution.py   L3  location + scale x empirical (fat-tailed) shape
+    levels.py         L5  P(touch) vs P(close beyond), from a measured touch curve
+    options_edge.py   L6  edge = EV(our distribution) - EV(implied distribution)
+    decision.py       L7  five views; NO TRADE is the default
+    engine.py             orchestration
+    report.py             the pre-market card
+    legacy.py             adapters so the incumbent is scored identically
+
+Commands: `model_cli.py premarket` and `model_cli.py forecast-eval`.
+
+`options_edge.evaluate_structure` computes P&L as `exit_value - price_paid
+- friction`, so **EV now moves when you overpay** — verified: paying 115%
+of quoted changes the number, where the audited engine's premium term
+cancelled algebraically (F-10). The structure menu includes defined-risk
+short-volatility structures, and on live data the iron butterfly and iron
+condor rank first on edge while every long-premium structure is negative
+after the hurdle — the measured premium reproducing itself in the ranking
+without being hard-coded there.
+
+## Honest limits
+
+- **No historical option chain**, so L6 is validated on logic and on
+  VIX-as-implied, never on real fills. `archive-chain` is accumulating the
+  data; ~40 sessions are needed.
+- **The edge is real but may be out of reach.** The short-vol structures
+  that rank first risk ~₹23,000/lot, against a ₹2,500 budget at 0.5% of
+  ₹500,000. The engine now says exactly what equity or risk tolerance the
+  trade would need rather than just "too small".
+- **`up_session` base rate is 0.479** — the session is down more often than
+  up, while the gap is up 62% of the time. All the drift is overnight, and
+  none of it is capturable by an intraday entry.
+- GIFT Nifty, the most direct read of the NIFTY open, is still not fetched.
+  It would sharpen the gap forecast further but cannot make it tradeable.

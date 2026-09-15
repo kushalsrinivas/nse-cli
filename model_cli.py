@@ -371,6 +371,152 @@ def cmd_tonight(args) -> int:
     return 0
 
 
+def cmd_premarket(args) -> int:
+    """08:30 IST pre-market decision from the evaluated forecast stack."""
+    from data import source
+    from model.forecast.engine import build_premarket
+    from model.forecast.report import render_premarket
+    from model.macro import fetch_macro_history
+
+    result = source.get_nifty_history(period=args.period)
+    chain = None
+    try:
+        chain = source.get_nifty_chain(source=args.source)
+    except Exception as exc:
+        console.print(f"[yellow]option chain unavailable: {exc}[/]")
+    macro = None
+    try:
+        macro = fetch_macro_history("5y")
+    except Exception as exc:
+        console.print(f"[yellow]macro unavailable ({exc}) — the gap model, "
+                      f"which is the one measured edge here, will be absent[/]")
+    vix = None
+    try:
+        level, _ = source.get_india_vix()
+        vix = level or None
+    except Exception:
+        pass
+
+    out = build_premarket(result.candles, chain=chain, macro=macro,
+                          vix_level=vix)
+    render_premarket(out, console)
+    return 0
+
+
+def cmd_forecast_eval(args) -> int:
+    """Score the forecast stack — and the legacy engine — on the harness."""
+    import numpy as np
+
+    from data import source
+    from model.forecast import evaluate as ev
+    from model.forecast.features import EOD, PREOPEN, build_dataset
+    from model.forecast.legacy import (
+        composite_score_buckets,
+        legacy_cohort_magnitude,
+        legacy_cohort_predictions,
+        legacy_composite_predictions,
+    )
+    from model.forecast.models import logistic_factory, ridge_factory
+    from model.macro import fetch_macro_history
+
+    candles = source.get_nifty_history(period=args.period).candles
+    macro = fetch_macro_history("5y")
+    spec = ev.FoldSpec(min_train=args.min_train, step=args.step, embargo=1)
+    console.print(f"[dim]walk-forward: {args.min_train} min train, "
+                  f"refit every {args.step}, 1-session embargo[/]")
+
+    if not args.skip_legacy:
+        console.print("\n[bold]Incumbent engine[/]")
+        coh = legacy_cohort_predictions(candles)
+        base = ev.Predictions(coh.index, coh.y_true,
+                              np.full(len(coh), coh.y_true.mean()), name="constant")
+        s = ev.score_binary(coh, base)
+        console.print(f"  cohort P(direction)  n={s.n}  Brier {s.metrics['brier']:.4f}  "
+                      f"skill {s.metrics.get('brier_skill', 0):+.4f}  "
+                      f"AUC {s.metrics['auc']:.3f}  "
+                      f"beats baseline: {s.metrics.get('beats_baseline')}",
+                      soft_wrap=True)
+        mag = legacy_cohort_magnitude(candles)
+        z = ev.Predictions(mag.index, mag.y_true, np.zeros(len(mag)),
+                           name="zero", kind="point")
+        sm = ev.score_point(mag, z)
+        console.print(f"  cohort mean gap      n={sm.n}  MAE {sm.metrics['mae']:.4f}  "
+                      f"corr {sm.metrics['corr']:+.3f}  "
+                      f"beats zero-forecast: {sm.metrics.get('beats_baseline')}",
+                      soft_wrap=True)
+        comp = legacy_composite_predictions(candles)
+        console.print("  composite score → realised hit rate:")
+        for b in composite_score_buckets(comp):
+            console.print(f"     {b['bucket']:>7}  n={b['n']:>4}  "
+                          f"realised {b['hit_rate']:.3f}  "
+                          f"engine claims {b['mean_predicted']:.3f}")
+
+    def _align(a, b):
+        """Score only where both series have a prediction.
+
+        `xy()` drops rows per feature set, so a model and its baseline can
+        end up on different indexes; scoring them unaligned silently skips
+        the paired delta and reports no verdict at all.
+        """
+        common = a.index.intersection(b.index)
+        def cut(P):
+            m = P.index.isin(common)
+            return ev.Predictions(P.index[m], P.y_true[m], P.y_pred[m],
+                                  name=P.name, folds=P.folds, kind=P.kind)
+        return cut(a), cut(b)
+
+    console.print("\n[bold]Forecast stack[/]")
+    console.print(f"  {'decision':<9}{'target':<12}{'tradeable':<16}{'n':>5}"
+                  f"  {'metric':<26}{'baseline':<14}verdict",
+                  soft_wrap=True)
+    console.print("  " + "-" * 92, soft_wrap=True)
+    for dp, target, kind in ((EOD, "up_gap", "binary"),
+                             (PREOPEN, "up_gap", "binary"),
+                             (PREOPEN, "up_session", "binary"),
+                             (PREOPEN, "range_pct", "point")):
+        ds = build_dataset(candles, macro, decision_point=dp)
+        cols = [c for c in ds.domestic_cols + ds.macro_cols if c in ds.frame.columns]
+        X, y, idx = ds.xy(target, cols)
+        if kind == "binary":
+            p = ev.walk_forward(X, y, idx, logistic_factory(1.0), spec=spec, name=target)
+            b = ev.walk_forward(X, y, idx, lambda: ev.ConstantProbability(),
+                                spec=spec, name="constant P(up)")
+            p, b = _align(p, b)
+            s = ev.score_binary(p, b)
+            metric = f"Brier {s.metrics['brier']:.4f}  AUC {s.metrics['auc']:.3f}"
+            base_txt = f"Brier {ev.brier(b.y_true, b.y_pred):.4f}"
+        else:
+            p = ev.walk_forward(X, y, idx, ridge_factory(1.0), spec=spec,
+                                name=target, kind="point")
+            Xb, yb, ib = ds.xy(target, ["d_rv20"])
+            b = ev.walk_forward(Xb, yb, ib, ridge_factory(1.0), spec=spec,
+                               name="trailing vol", kind="point")
+            p, b = _align(p, b)
+            s = ev.score_point(p, b)
+            metric = f"MAE {s.metrics['mae']:.4f}  r {s.metrics['corr']:+.3f}"
+            base_txt = f"MAE {ev.mae(b.y_true, b.y_pred):.4f}"
+        # `up_gap` is the binary form of `gap_pct`; compare base names.
+        # Range is tradeable at either point because a volatility structure
+        # expresses it without needing a direction.
+        if target == "range_pct":
+            trade_tag = "TRADEABLE (vol)"
+        elif target.replace("up_", "") in ds.tradeable_target:
+            trade_tag = "TRADEABLE"
+        else:
+            trade_tag = "context only"
+        beats = s.metrics.get("beats_baseline")
+        verdict = Text("BEATS BASELINE" if beats else "no",
+                       style="green" if beats else "yellow")
+        console.print(f"  {dp:<9}{target:<12}{trade_tag:<16}{s.n:>5}"
+                      f"  {metric:<26}{base_txt:<14}", end="", soft_wrap=True)
+        console.print(verdict, soft_wrap=True)
+    console.print("[dim]'beats baseline?' = the 95% block-bootstrap CI on the "
+                  "paired loss difference excludes zero. A 'context only' row "
+                  "can be highly predictable and still untradeable — the "
+                  "PREOPEN gap is known before you can act on it.[/]")
+    return 0
+
+
 def cmd_archive_chain(args) -> int:
     """Persist tonight's option chain. Cron this at ~15:25 IST."""
     from data import source
@@ -1094,6 +1240,19 @@ def main() -> int:
     kl.add_argument("--logout", action="store_true",
                     help="delete the stored session")
 
+    pm = sub.add_parser("premarket",
+                        help="08:30 IST pre-market decision (the evaluated stack)")
+    pm.add_argument("--period", default="5y",
+                    help="history for fitting the gap model and the shape")
+    pm.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"))
+
+    fe = sub.add_parser("forecast-eval",
+                        help="score the forecast stack and the incumbent engine")
+    fe.add_argument("--period", default="5y")
+    fe.add_argument("--min-train", type=int, default=400)
+    fe.add_argument("--step", type=int, default=21)
+    fe.add_argument("--skip-legacy", action="store_true")
+
     ac = sub.add_parser("archive-chain",
                         help="persist tonight's option chain for future backtests")
     ac.add_argument("--underlying", default="NIFTY",
@@ -1133,6 +1292,8 @@ def main() -> int:
         "breadth-backtest": cmd_breadth_backtest,
         "tonight": cmd_tonight,
         "stock-overnight": cmd_stock_overnight,
+        "premarket": cmd_premarket,
+        "forecast-eval": cmd_forecast_eval,
         "archive-chain": cmd_archive_chain,
         "kite-login": cmd_kite_login,
         "kite-master": cmd_kite_master,

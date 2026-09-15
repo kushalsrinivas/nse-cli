@@ -27,6 +27,8 @@ with a session — see below).
 | `model_cli.py stock-overnight [--symbol X] [--lots N]` | Naked CE/PE overnight per stock, ranked GO table (separate journal) |
 | `model_cli.py evaluate / backtest / optimize / journal` | Score now · walk-forward report · fit weights · review setups |
 | `model_cli.py breadth / breadth-backtest` | Constituent snapshot · NIFTY-only vs NIFTY+breadth ablation |
+| `model_cli.py premarket` | 08:30 IST pre-market card: gap forecast, distribution, levels, structures |
+| `model_cli.py forecast-eval` | Score the forecast stack + the incumbent engine on the harness |
 | `model_cli.py archive-chain [--expiries N]` | Persist tonight's option chain — **cron this at ~15:25 IST** |
 | `model_cli.py kite-login / kite-master / kite-parity / kite-live` | Kite session · instrument master · source parity · WS streaming |
 | `main.py -oj` , `--settle-overnight ID PX` , `--settle-confluence ID PX` , `--settle-stock ID PX` | Journals + manual settlement |
@@ -78,13 +80,25 @@ fetchers is the degrade-don't-crash design.
 
 ## Known limitations (honest)
 
-**The base model has no measured directional edge.** Audited against five
-years of its own target: 59.7% hit rate on the overnight gap versus 62.2%
-for always predicting "up", and the composite score is flat against outcome
-(65-70 scores hit 56.2%, 80+ hit 58.2%). The cohort probability engine
-scores worse on Brier than the unconditional gap rate, and its magnitude
-forecast is negatively correlated with the realized gap. Treat every
-directional number the engine prints as unvalidated. See `docs/AUDIT.md`.
+**There is no measured directional edge — at either decision point, under
+any model tested.** Five years, purged walk-forward, named baselines:
+EOD gap direction AUC 0.551, PREOPEN session direction AUC 0.539, neither
+beating a constant. Gradient boosting does not help; no regime slice
+survives multiple comparisons. The legacy composite score claims 70.4% at
+80+ and delivers 61.6%.
+
+**Two things do beat their baselines.** The PREOPEN gap direction (AUC
+0.748, Brier 0.210 vs 0.248) — but it is known at 08:30 and you enter at
+the 09:15 open, so it is context, not a trade. And the session range
+forecast, which beats trailing realised vol though not India VIX.
+
+**The one robust tradeable edge is short volatility.** Implied/realised =
+1.19x over 1,221 sessions (95% CI [+0.107, +0.194]); P(|move| > 1 implied
+sigma) = 0.218 against 0.317 if fair. Long-premium structures start ~19%
+behind, and the legacy engine only ever bought premium.
+
+Run `model_cli.py forecast-eval` to reproduce all of it. Details in
+`docs/AUDIT.md`.
 
 - **No historical option chain exists**, so the EV engine cannot be
   validated at all. `archive-chain` starts fixing this from today forward;
