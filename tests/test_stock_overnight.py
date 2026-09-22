@@ -124,7 +124,7 @@ class TestStockRunner(unittest.TestCase):
         from model.stock_overnight import evaluate_stock
         frame = _trend_frame(n=60)
         bundle = ConstituentBundle(frames={"RELIANCE.NS": frame}, missing=[])
-        r = evaluate_stock("RELIANCE", lots=1, bundle=bundle,
+        r = evaluate_stock("RELIANCE", lots=1, bundle=bundle, source="yahoo",
                            chain=_chain(), expiries=["2026-09-24"])
         self.assertEqual(r.decision, "SKIPPED")
         self.assertIn("insufficient history", r.error)
@@ -134,7 +134,7 @@ class TestStockRunner(unittest.TestCase):
         from model.stock_overnight import evaluate_stock
         frame = _trend_frame()
         bundle = ConstituentBundle(frames={"RELIANCE.NS": frame}, missing=[])
-        r = evaluate_stock("RELIANCE", lots=2, bundle=bundle,
+        r = evaluate_stock("RELIANCE", lots=2, bundle=bundle, source="yahoo",
                            chain=_chain(), expiries=["2026-09-24"])
         self.assertIn(r.decision, ("GO", "NO-GO"))
         self.assertEqual(r.lot_size, 500)

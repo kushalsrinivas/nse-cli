@@ -30,6 +30,7 @@ with a session — see below).
 | `model_cli.py premarket` | 08:30 IST pre-market card: gap forecast, distribution, levels, structures |
 | `model_cli.py premarket --exit 23100CE@223.55` | Price a position you already hold: exit at the open, or hold? |
 | `model_cli.py forecast-eval` | Score the forecast stack + the incumbent engine on the harness |
+| `tonight --laya` · `premarket --laya` · `laya` · `laya-eval` | Laya veto filter on the overnight/premarket cards and Setups A/B/C (shadow default; `--laya-enforce` applies) |
 | `model_cli.py archive-chain [--expiries N]` | Persist tonight's option chain — **cron this at ~15:25 IST** |
 | `model_cli.py kite-login / kite-master / kite-parity / kite-live` | Kite session · instrument master · source parity · WS streaming |
 | `main.py -oj` , `--settle-overnight ID PX` , `--settle-confluence ID PX` , `--settle-stock ID PX` | Journals + manual settlement |
@@ -78,6 +79,7 @@ fetchers is the degrade-don't-crash design.
 - `docs/BREADTH_LAYER.md` — breadth design, guardrails, ablation evidence
 - `docs/STOCK_OVERNIGHT.md` — per-stock engine, lots, journal, caveats
 - `docs/KITE.md` — Kite service: commands, data audit, production rules
+- `docs/LAYA.md` — Laya veto filter: questions, policy, shadow mode, evaluation
 
 ## Known limitations (honest)
 

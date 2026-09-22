@@ -17,6 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff>=0.8"]
+# Laya veto filter (model/laya_filter). Pulls torch + transformers, so optional.
+laya = ["laya>=0.3.4"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

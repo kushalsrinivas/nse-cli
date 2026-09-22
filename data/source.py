@@ -48,27 +48,64 @@ _vix_cache: dict = {"at": 0.0, "value": (None, None)}
 VIX_CACHE_TTL = 120
 
 
-def session_available() -> bool:
-    """True when Kite is actually usable: creds present + session valid."""
+# Process-wide default for callers that pass source="auto" (the TUI and the
+# classic dashboard never threaded a `source` argument through, so `--source`
+# was silently ignored outside --tonight/--stock-overnight). main.py sets this
+# once at startup; everything else keeps calling with the "auto" default.
+_default_source = SOURCE_AUTO
+
+
+def set_default_source(source: str) -> None:
+    """Set what "auto" resolves to for the rest of the process."""
+    global _default_source
+    source = (source or SOURCE_AUTO).lower()
+    if source not in (SOURCE_AUTO, SOURCE_KITE, SOURCE_YAHOO):
+        raise ValueError(f"unknown source {source!r}")
+    _default_source = source
+
+
+def default_source() -> str:
+    return _default_source
+
+
+def session_status() -> tuple[bool, str]:
+    """(kite_usable, human reason). Never raises — safe for banners."""
     try:
-        from data.kite.auth import credentials, load_session, session_valid
-        credentials()
-        return bool(session_valid(load_session()))
-    except Exception:
-        return False
+        from data.kite.auth import load_session, read_api_key, session_valid
+    except Exception as exc:  # pragma: no cover - import-time breakage only
+        return False, f"kite module unavailable ({exc})"
+    session = load_session()
+    if not session:
+        return False, "no saved session — run `model_cli.py kite-login`"
+    if not session_valid(session):
+        return False, ("session expired (they die 6 AM IST daily) — run "
+                       "`model_cli.py kite-login`")
+    try:
+        read_api_key(session)
+    except Exception as exc:
+        return False, str(exc)
+    return True, f"session valid (user {session.get('user_id') or '?'})"
+
+
+def session_available() -> bool:
+    """True when Kite is actually usable: api key resolvable + session valid."""
+    ok, _ = session_status()
+    return ok
 
 
 def want_kite(source: str = SOURCE_AUTO) -> bool:
     """Resolve the tri-state. Explicit "kite" without a session raises."""
     source = (source or SOURCE_AUTO).lower()
+    if source == SOURCE_AUTO:
+        source = _default_source
     if source == SOURCE_YAHOO:
         return False
     if source == SOURCE_KITE:
+        # Go through session_available() so callers/tests keep a single
+        # patchable seam; session_status() is only consulted for the reason.
         if not session_available():
             from data.kite.auth import KiteAuthError
-            raise KiteAuthError(
-                "source=kite requested but no valid session — run "
-                "`model_cli.py kite-login` (sessions expire 6 AM IST daily)")
+            raise KiteAuthError(f"source=kite requested but {session_status()[1]}")
         return True
     return session_available()
 
@@ -286,9 +323,11 @@ def get_nifty_chain(expiry=None, use_cache: bool = True,
         spot = (ltp.get("NSE:NIFTY 50") or {}).get("last_price")
         if not spot:
             raise ValueError("no NIFTY spot LTP")
-        chain, _ = KiteChainProvider(rest, store).chain_for("NIFTY", spot)
-        if expiry and chain.expiries and chain.expiries[0] != expiry:
-            raise ValueError(f"kite nearest {chain.expiries[0]} != {expiry}")
+        # Pass the requested expiry through. It used to be dropped and then
+        # compared against the nearest series, so ANY non-nearest expiry
+        # raised here and silently demoted the whole chain to the NSE scrape.
+        chain, _ = KiteChainProvider(rest, store).chain_for(
+            "NIFTY", spot, expiry=expiry)
         log.info("nifty chain via kite (%s)", chain.expiries[0] if chain.expiries else "?")
         return chain
     except Exception as exc:
@@ -313,9 +352,8 @@ def get_stock_chain(short: str, expiry=None, use_cache: bool = True,
         spot = (ltp.get(f"NSE:{short}") or {}).get("last_price")
         if not spot:
             raise ValueError(f"no LTP for {short}")
-        chain, _ = KiteChainProvider(rest, store).chain_for(short, spot)
-        if expiry and chain.expiries and chain.expiries[0] != expiry:
-            raise ValueError(f"kite nearest {chain.expiries[0]} != {expiry}")
+        chain, _ = KiteChainProvider(rest, store).chain_for(
+            short, spot, expiry=expiry)
         return chain
     except Exception as exc:
         log.warning("kite %s chain failed (%s); NSE fallback", short, exc)

@@ -5,8 +5,16 @@ Paper-only. No order placement anywhere in this package.
 ## Commands
 
 - `model_cli.py kite-login [--request-token T] [--logout]` — session setup.
-  Login lasts till 6 AM IST; credentials from `KITE_API_KEY`/`KITE_API_SECRET`
-  only; token cache `~/.config/nifty-strats/kite_session.json` (0600).
+  Login lasts till 6 AM IST; credentials from `KITE_API_KEY`/`KITE_API_SECRET`,
+  read from the environment or from `.env` (auto-loaded by `main.py` and
+  `model_cli.py`; an exported variable wins). Token cache
+  `~/.config/nifty-strats/kite_session.json` (0600).
+  `KITE_API_SECRET` is needed **only for the login exchange** — market-data
+  calls run off the saved session, which carries its own `api_key`.
+- `main.py --data-check` — report which feed is live (kite vs yahoo), why,
+  and how fresh the newest bar is. Start here when data looks wrong: a
+  missing session silently demotes every feed to Yahoo, whose `^NSEI`
+  history can lag NSE by several sessions.
 - `model_cli.py kite-master [--exchange X]` — daily master refresh.
 - `model_cli.py kite-parity [--days 60] [--all]` — Kite vs yfinance closes
   + NSE-scrape vs Kite chain LTPs. Must be clean before trusting Kite data.

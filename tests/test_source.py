@@ -41,15 +41,76 @@ class TestWantKite(unittest.TestCase):
         with patch.object(datasrc, "session_available", return_value=False):
             self.assertFalse(datasrc.want_kite("auto"))
 
-    def test_session_available_needs_creds(self):
+    def test_session_available_without_env_creds(self):
+        """A valid saved session is enough for READS — no KITE_API_SECRET.
+
+        Requiring the secret (only needed to exchange a request_token at
+        login) made every getter fall back to the stale Yahoo feed whenever
+        the secret was not exported. Isolated via KITE_CONFIG_DIR so the
+        developer's real session never decides the result.
+        """
+        import json
         import os
-        old = {k: os.environ.pop(k, None) for k in ("KITE_API_KEY", "KITE_API_SECRET")}
+        saved = {k: os.environ.pop(k, None)
+                 for k in ("KITE_API_KEY", "KITE_API_SECRET", "KITE_CONFIG_DIR")}
         try:
-            self.assertFalse(datasrc.session_available())
+            with tempfile.TemporaryDirectory() as tmp:
+                os.environ["KITE_CONFIG_DIR"] = tmp
+                # No session at all -> unusable, with a reason.
+                self.assertFalse(datasrc.session_available())
+                ok, reason = datasrc.session_status()
+                self.assertFalse(ok)
+                self.assertIn("kite-login", reason)
+
+                # Valid session carrying its own api_key -> usable.
+                login = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                Path(tmp, "kite_session.json").write_text(json.dumps({
+                    "access_token": "tok", "api_key": "key-from-session",
+                    "login_time": login, "user_id": "AB1234"}))
+                self.assertTrue(datasrc.session_available())
+                ok, reason = datasrc.session_status()
+                self.assertTrue(ok)
+                self.assertIn("AB1234", reason)
         finally:
-            for k, v in old.items():
+            for k, v in saved.items():
+                os.environ.pop(k, None)
                 if v is not None:
                     os.environ[k] = v
+
+    def test_expired_session_is_unusable(self):
+        import json
+        import os
+        saved = {k: os.environ.pop(k, None)
+                 for k in ("KITE_API_KEY", "KITE_API_SECRET", "KITE_CONFIG_DIR")}
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                os.environ["KITE_CONFIG_DIR"] = tmp
+                Path(tmp, "kite_session.json").write_text(json.dumps({
+                    "access_token": "tok", "api_key": "k",
+                    "login_time": "2020-01-01 09:00:00", "user_id": "AB1234"}))
+                self.assertFalse(datasrc.session_available())
+                self.assertIn("expired", datasrc.session_status()[1])
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_default_source_steers_auto(self):
+        original = datasrc.default_source()
+        try:
+            datasrc.set_default_source("yahoo")
+            # "auto" must now resolve to yahoo even with a live session.
+            with patch.object(datasrc, "session_available", return_value=True):
+                self.assertFalse(datasrc.want_kite("auto"))
+                self.assertTrue(datasrc.want_kite("kite"))
+            datasrc.set_default_source("auto")
+            with patch.object(datasrc, "session_available", return_value=True):
+                self.assertTrue(datasrc.want_kite("auto"))
+            with self.assertRaises(ValueError):
+                datasrc.set_default_source("bloomberg")
+        finally:
+            datasrc.set_default_source(original)
 
 
 class TestHistoryRouting(unittest.TestCase):

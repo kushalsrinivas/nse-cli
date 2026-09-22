@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from config import SETTINGS
 from data.options import ChainRow, OptionChain, OptionLeg
 from model.options_ev import bs_price, days_to_expiry
 
@@ -82,11 +83,17 @@ def attach_ivs(rows: list[ChainRow], spot: float, dte_days: float) -> list[Chain
 
 def build_chain(underlying: str, expiry: str, strikes: list[float],
                 sides: dict[float, dict], spot: float,
-                dte_days: float | None = None) -> OptionChain:
+                dte_days: float | None = None,
+                expiries: list[str] | None = None) -> OptionChain:
     """Assemble an OptionChain.
 
     `sides` maps strike -> {"CALL": quote, "PUT": quote} (missing side/leg
     = empty dict -> unquotable leg, same convention as a thin NSE row).
+
+    `expiries` is the full tradable list for the underlying. The rows always
+    belong to `expiry`, but the chain advertises every expiry so the UI's
+    expiry selector has somewhere to go; publishing only the rendered one
+    made the NSE fallback the sole way to see a later series.
     """
     dte = dte_days if dte_days is not None else max(days_to_expiry(expiry), 0.25)
     rows = []
@@ -97,7 +104,10 @@ def build_chain(underlying: str, expiry: str, strikes: list[float],
             call=quote_leg(pair.get("CALL"), strike, expiry),
             put=quote_leg(pair.get("PUT"), strike, expiry)))
     rows = attach_ivs(rows, spot, dte)
-    return OptionChain(underlying_value=round(spot, 2), expiries=(expiry,),
+    # The rendered expiry must lead: callers read `expiries[0]` as "what
+    # this chain actually contains".
+    ordered = [expiry] + [e for e in (expiries or []) if e != expiry]
+    return OptionChain(underlying_value=round(spot, 2), expiries=tuple(ordered),
                        rows=tuple(rows), source="kite-assembled",
                        fetched_at=datetime.now())
 
@@ -115,10 +125,22 @@ class KiteChainProvider:
 
     def chain_for(self, underlying: str, spot: float,
                   expiry: str | None = None,
-                  wings: int = 5) -> tuple[OptionChain, dict]:
-        """(chain, raw quote map) for measurement/debugging."""
+                  wings: int | None = None) -> tuple[OptionChain, dict]:
+        """(chain, raw quote map) for measurement/debugging.
+
+        `wings` defaults to SETTINGS.strike_window so the Kite chain is as
+        wide as the NSE fallback the UI was built against; the old hardcoded
+        5 produced 11 strikes where the dashboard renders 21.
+        """
         from data.kite import instruments as ki
-        expiry = expiry or ki.option_expiries(self.store, underlying)[0]
+        wings = SETTINGS.strike_window if wings is None else wings
+        expiries = ki.option_expiries(self.store, underlying)
+        if not expiries:
+            raise ValueError(f"no tradable {underlying} expiries in master")
+        expiry = expiry or expiries[0]
+        if expiry not in expiries:
+            raise ValueError(f"{underlying} expiry {expiry} not tradable "
+                             f"(nearest {expiries[0]})")
         ladder, _atm = ki.atm_strikes(self.store, underlying, expiry, spot, wings)
         if not ladder:
             raise ValueError(f"no {underlying} strikes for {expiry} in master")
@@ -139,5 +161,6 @@ class KiteChainProvider:
                 if key in index and quote.get("last_price"):
                     strike, side = index[key]
                     quotes.setdefault(strike, {})[side] = quote
-        chain = build_chain(underlying, expiry, ladder, quotes, spot)
+        chain = build_chain(underlying, expiry, ladder, quotes, spot,
+                            expiries=expiries)
         return chain, quotes

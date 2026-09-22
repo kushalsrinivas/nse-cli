@@ -18,14 +18,22 @@ class TonightResult:
     screen: object = None
     snap: object = None
     kite_meta: dict | None = None
+    laya: object = None                   # services.laya.LayaRun when --laya
     notices: list[tuple[str, str]] = field(default_factory=list)
 
 
 def run_tonight(*, period: str = "2y", source: str = "auto",
                 cperiod: str = "6mo", no_breadth: bool = False,
                 events: list[str] | None = None,
-                journal: bool = False) -> TonightResult:
-    """Full overnight card. Dry run unless `journal=True` (records)."""
+                journal: bool = False, laya: bool = False,
+                laya_enforce: bool = False,
+                laya_filter=None) -> TonightResult:
+    """Full overnight card. Dry run unless `journal=True` (records).
+
+    `laya=True` asks Laya to judge the finished card (shadow unless
+    `laya_enforce`). It runs before journaling, so an enforced veto is what
+    gets recorded.
+    """
     from model.overnight import collect_overnight_signals
     from model.overnight_card import build_overnight_setup
     from model.pipeline import evaluate
@@ -56,9 +64,32 @@ def run_tonight(*, period: str = "2y", source: str = "auto",
 
     signals = collect_overnight_signals(bundle.candles)
     meta = bundle.kite_meta or {}
+
+    post_decision = None
+    if laya:
+        from datetime import date
+
+        from model.laya_filter.cards import overnight_card_state, veto_overnight
+        from services.laya import judge_card
+
+        def post_decision(setup):
+            vix = None
+            try:
+                from data import source as datasrc
+                vix = datasrc.get_india_vix()[0] or None
+            except Exception:
+                pass
+            result.laya = judge_card(
+                overnight_card_state(setup, events=events, vix=vix),
+                enforce=laya_enforce, journal=journal,
+                run_id=f"ON-{date.today().isoformat()}",
+                apply_veto=lambda v: veto_overnight(setup, v),
+                laya_filter=laya_filter)
+            result.notices.extend(result.laya.notices)
     result.setup = build_overnight_setup(
         bundle.candles, bundle.chain, signals=signals,
         events=events or None, breadth=breadth.snap, record=journal,
         fut_basis_bps=meta.get("basis_bps"),
-        fut_oi_chg_pct=meta.get("fut_oi_chg_pct"))
+        fut_oi_chg_pct=meta.get("fut_oi_chg_pct"),
+        post_decision=post_decision)
     return result

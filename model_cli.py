@@ -20,7 +20,9 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from config import SETTINGS
+from config import SETTINGS, load_env_file
+
+load_env_file()
 
 console = Console()
 
@@ -324,6 +326,15 @@ def _render_verdict(setup, screen, snap, kite_meta=None) -> None:
                         expand=False))
 
 
+def _render_laya(run) -> None:
+    """Laya verdict table under a card (no-op when --laya was not asked)."""
+    if run is None or not run.verdicts:
+        return
+    from model.laya_filter.view import verdict_line
+    for v in run.verdicts:
+        console.print(verdict_line(v, enforced=run.enforced))
+
+
 def cmd_tonight(args) -> int:
     """One EOD run: fetch once, screen, attach breadth lazily, verdict first.
 
@@ -339,7 +350,8 @@ def cmd_tonight(args) -> int:
         result = run_tonight(
             period=args.period, source=getattr(args, "source", "auto") or "auto",
             cperiod=args.cperiod, no_breadth=getattr(args, "no_breadth", False),
-            events=args.event or None, journal=args.journal)
+            events=args.event or None, journal=args.journal,
+            laya=args.laya or args.laya_enforce, laya_enforce=args.laya_enforce)
     except KiteAuthError as exc:
         console.print(f"[red]{exc}[/]")
         return 1
@@ -348,6 +360,7 @@ def cmd_tonight(args) -> int:
 
     # 3. Verdict first, audit behind --verbose.
     _render_verdict(setup, screen, snap, kite_meta=result.kite_meta)
+    _render_laya(result.laya)
     if args.verbose:
         render_overnight(setup, console)
         if setup.overnight_setups is not None:
@@ -399,7 +412,20 @@ def cmd_premarket(args) -> int:
 
     out = build_premarket(result.candles, chain=chain, macro=macro,
                           vix_level=vix)
+    laya_run = None
+    if args.laya or args.laya_enforce:
+        from datetime import date
+
+        from model.laya_filter.cards import premarket_state, veto_premarket
+        from services.laya import judge_card
+        laya_run = judge_card(
+            premarket_state(out, vix=vix), enforce=args.laya_enforce,
+            journal=args.journal, run_id=f"PM-{date.today().isoformat()}",
+            apply_veto=lambda v: veto_premarket(out, v))
     render_premarket(out, console)
+    if laya_run is not None:
+        _notice_print(laya_run.notices)
+        _render_laya(laya_run)
 
     if args.exit:
         from model.forecast.position import (
@@ -678,16 +704,16 @@ def cmd_kite_live(args) -> int:
     from model.breadth.universe import get_universe
 
     IST = ZoneInfo("Asia/Kolkata")
-    try:
-        from data.kite.config import credentials
-        creds = credentials()
-    except Exception as exc:
-        console.print(f"[red]{exc}[/]")
-        return 1
     session = load_session()
-    from data.kite.auth import session_valid
+    from data.kite.auth import read_api_key, session_valid
     if not session_valid(session):
         console.print("[red]no valid kite session — run `model_cli.py kite-login`[/]")
+        return 1
+    # Streaming needs the api_key only; the secret is a login-time concern.
+    try:
+        ws_api_key = read_api_key(session)
+    except Exception as exc:
+        console.print(f"[red]{exc}[/]")
         return 1
 
     rest = KiteRest()
@@ -749,7 +775,7 @@ def cmd_kite_live(args) -> int:
         console.print("  flop: " + bot)
 
     async def _main() -> None:
-        client = KiteWS(creds.api_key, session["access_token"],
+        client = KiteWS(ws_api_key, session["access_token"],
                         on_ticks=_ingest)
         task = asyncio.create_task(client.run())
         await client.subscribe(all_tokens, "quote")
@@ -966,6 +992,67 @@ def cmd_confluence(args) -> int:
     render_confluence(report, console)
     if not args.journal:
         console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
+    return 0
+
+
+def cmd_laya(args) -> int:
+    """Evaluate Setups A/B/C now, then let Laya judge each one.
+
+    Shadow mode unless --enforce: verdicts are shown (and journaled with
+    --journal) but a vetoed GO is only downgraded to WATCH when enforced.
+    Laya can never create or upgrade a trade.
+    """
+    from model.confluence.view import render_confluence
+    from model.laya_filter.view import verdicts_table
+    from services.intraday import run_confluence
+    from services.laya import judge_confluence
+
+    try:
+        report = run_confluence(source=args.source, journal=bool(args.journal),
+                                events=args.event or None)
+    except Exception as exc:
+        console.print(f"[red]evaluation failed: {exc}[/]")
+        return 1
+    run = judge_confluence(report, enforce=args.enforce,
+                           journal=bool(args.journal),
+                           events=args.event or None)
+    render_confluence(run.report, console)
+    _notice_print(run.notices)
+    if run.verdicts:
+        console.print(verdicts_table(run.verdicts, enforced=run.enforced))
+    if not args.journal:
+        console.print("[dim]dry-run: nothing journaled (pass --journal to record)[/]")
+    return 0
+
+
+def cmd_laya_eval(args) -> int:
+    """Do vetoed setups actually do worse? Joins verdicts to settled outcomes."""
+    from journal.laya_db import MIN_EVAL_ROWS, LayaJournal, evaluate_rows
+
+    lj = LayaJournal()
+    rows = lj.settled_confluence()
+    console.print(f"{lj.count()} verdicts journaled, {len(rows)} joined to "
+                  f"settled confluence outcomes")
+    if not rows:
+        console.print("[yellow]nothing to evaluate yet — run `laya --journal` "
+                      "alongside settled confluence runs[/]")
+        return 0
+    res = evaluate_rows(rows)
+    t = Table(title="Laya filter: kept vs would-veto", title_justify="left")
+    for col in ("arm", "n", "win rate", "mean P&L"):
+        t.add_column(col, justify="left" if col == "arm" else "right")
+    for name in ("kept", "vetoed"):
+        a = res[name]
+        t.add_row(name, str(a.n),
+                  "—" if a.win_rate is None else f"{a.win_rate:.1%}",
+                  "—" if a.mean_pnl is None else f"₹{a.mean_pnl:+,.0f}")
+    console.print(t)
+    auc = res["auc_p_fail"]
+    console.print(f"AUC of P(fail) vs LOSS: {'—' if auc is None else f'{auc:.3f}'}"
+                  "  (0.5 = no signal)")
+    if not res["conclusive"]:
+        console.print(f"[yellow]inconclusive: need ≥{MIN_EVAL_ROWS} settled rows "
+                      f"per arm before trusting (or enforcing) this filter[/]")
     return 0
 
 
@@ -1245,6 +1332,17 @@ def main() -> int:
     cf.add_argument("--verbose", action="store_true",
                     help="with --live: print the full setup table per evaluation")
 
+    ly = sub.add_parser("laya", help="Setups A/B/C + Laya veto filter (shadow mode default)")
+    ly.add_argument("--enforce", action="store_true",
+                    help="apply vetoes: a vetoed GO is downgraded to WATCH")
+    ly.add_argument("--journal", action="store_true",
+                    help="record the confluence run and Laya's verdicts")
+    ly.add_argument("--event", action="append", default=[],
+                    help="known intraday risk (repeatable)")
+    ly.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"))
+
+    sub.add_parser("laya-eval", help="kept vs vetoed setups on settled outcomes")
+
     br = sub.add_parser("breadth", help="tonight's constituent breadth + scenarios")
     br.add_argument("--period", default="1y")
     br.add_argument("--event", action="append", default=[],
@@ -1267,6 +1365,10 @@ def main() -> int:
                     help="record to overnight + setup journals (default: dry-run)")
     tn.add_argument("--no-breadth", action="store_true",
                     help="skip the constituent layer (NIFTY-only)")
+    tn.add_argument("--laya", action="store_true",
+                    help="Laya second opinion on the card (shadow: shown, not applied)")
+    tn.add_argument("--laya-enforce", action="store_true",
+                    help="apply a Laya veto (GO/TRADE -> NO-GO); implies --laya")
 
     so = sub.add_parser("stock-overnight", help="naked CE/PE overnight per stock, ranked GO table")
     so.add_argument("--lots", type=int, default=1,
@@ -1291,6 +1393,12 @@ def main() -> int:
     pm.add_argument("--period", default="5y",
                     help="history for fitting the gap model and the shape")
     pm.add_argument("--source", default="auto", choices=("auto", "yahoo", "kite"))
+    pm.add_argument("--laya", action="store_true",
+                    help="Laya second opinion on the card (shadow: shown, not applied)")
+    pm.add_argument("--laya-enforce", action="store_true",
+                    help="apply a Laya veto (GO/TRADE -> NO-GO); implies --laya")
+    pm.add_argument("--journal", action="store_true",
+                    help="record the Laya verdict (premarket keeps no other journal)")
     pm.add_argument("--exit", action="append", default=[], metavar="LEG",
                     help="price a position you already hold, e.g. "
                          "--exit 23100CE@223.55 (repeat for a spread; "
@@ -1356,6 +1464,8 @@ def main() -> int:
         "confluence-journal": cmd_confluence_journal,
         "cj": cmd_confluence_journal,
         "confluence": cmd_confluence,
+        "laya": cmd_laya,
+        "laya-eval": cmd_laya_eval,
     }
     return cmd_map[args.cmd](args)
 

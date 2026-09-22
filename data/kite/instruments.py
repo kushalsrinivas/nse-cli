@@ -57,16 +57,34 @@ def equity_token(store, short: str) -> int | None:
     return None
 
 
-def futures_chain(store, underlying: str) -> list[InstrumentRow]:
+def _today() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def futures_chain(store, underlying: str,
+                  include_expired: bool = False) -> list[InstrumentRow]:
     """Live futures for an underlying, nearest expiry first."""
+    today = _today()
     rows = [r for r in store.scan(exchange="NFO", instrument_type="FUT")
-            if underlying_match(r.tradingsymbol, underlying)]
+            if underlying_match(r.tradingsymbol, underlying)
+            and (include_expired or not r.expiry or r.expiry >= today)]
     return sorted(rows, key=lambda r: r.expiry or "9999")
 
 
-def option_expiries(store, underlying: str) -> list[str]:
+def option_expiries(store, underlying: str,
+                    include_expired: bool = False) -> list[str]:
+    """Tradable expiries, nearest first.
+
+    Expired contracts linger in the broker's master for a while after they
+    settle, so an unfiltered list put yesterday's expiry at index 0 and the
+    chain was assembled for a dead series (quotes frozen at their last
+    settlement, IVs inverted against a clamped 0.25-day DTE). Anything
+    before today is dropped unless explicitly requested.
+    """
+    today = _today()
     rows = [r for r in store.scan(exchange="NFO", instrument_type=("CE", "PE"))
-            if underlying_match(r.tradingsymbol, underlying) and r.expiry]
+            if underlying_match(r.tradingsymbol, underlying) and r.expiry
+            and (include_expired or r.expiry >= today)]
     return sorted({r.expiry for r in rows})
 
 

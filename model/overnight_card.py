@@ -289,7 +289,8 @@ def build_overnight_setup(candles, chain: OptionChain | None,
                           expiry_dates: list[str] | None = None,
                           underlying: str = "NIFTY",
                           fut_basis_bps: float | None = None,
-                          fut_oi_chg_pct: float | None = None) -> OvernightSetup:
+                          fut_oi_chg_pct: float | None = None,
+                          post_decision=None) -> OvernightSetup:
     """Evaluate tonight's setup through the distributional EV engine.
 
     `breadth` is an optional `BreadthSnapshot` for tonight (see
@@ -305,6 +306,9 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     Gate 3 and signal discipline from the NIFTY weekday heuristic to exact
     date matching. Contract sizing throughout uses `settings.lot_size`.
     `fut_basis_bps` / `fut_oi_chg_pct` feed the ON-A / ON-D setup legs.
+    `post_decision(setup)` runs after the gates and before journaling, so a
+    veto layer (Laya) is recorded as part of the verdict. It may only turn
+    GO into NO-GO.
     """
     from analysis.signals import Direction as Dir
     from model.backtest import _base_frame
@@ -591,6 +595,10 @@ def build_overnight_setup(candles, chain: OptionChain | None,
     # Deduplicate reasons list cleanly
     setup.reasons = list(dict.fromkeys(reasons))
     setup.go = (len(setup.reasons) == 0)
+    if post_decision is not None:
+        was_go = setup.go
+        post_decision(setup)
+        setup.go = setup.go and was_go      # a hook can veto, never create
     if record:
         _record(setup, journal, events=events)
     return setup

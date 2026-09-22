@@ -15,7 +15,12 @@ from datetime import datetime
 import pandas as pd
 
 from data import nifty as nifty_data
-from data.kite.auth import KiteAuthError, credentials, load_session, session_valid
+from data.kite.auth import (
+    KiteAuthError,
+    load_session,
+    read_api_key,
+    session_valid,
+)
 
 log = logging.getLogger(__name__)
 
@@ -51,18 +56,18 @@ def kite_client():
 
     Raises KiteAuthError pointing at `kite-login` when missing/expired.
     """
-    creds = credentials()
     session = load_session()
     if not session_valid(session):
         raise KiteAuthError(
             "no valid kite session — run `model_cli.py kite-login` "
             "(sessions expire 6 AM IST daily)")
+    api_key = read_api_key(session)
     try:
         from kiteconnect import KiteConnect
     except ImportError as exc:
         raise KiteAuthError(
             "kiteconnect is not installed (pip install kiteconnect)") from exc
-    client = KiteConnect(api_key=creds.api_key)
+    client = KiteConnect(api_key=api_key)
     client.set_access_token(session["access_token"])
     return client
 

@@ -2,11 +2,50 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 CACHE_DIR = PROJECT_ROOT / "cache"
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def load_env_file(path: Path | None = None, override: bool = False) -> list[str]:
+    """Load `KEY=value` lines from `.env` into os.environ. Returns keys set.
+
+    Previously the app never read `.env`, so anyone who followed the README
+    but forgot `set -a; source .env` ran with no KITE_API_KEY. That does not
+    fail loudly: `data.source.session_available()` swallows the error and the
+    whole app silently degrades to Yahoo, which lags NSE by days. Loading the
+    file here makes the documented setup actually work.
+
+    A real exported variable always wins (override=False), so CI and
+    per-shell overrides keep their precedence.
+    """
+    path = Path(path) if path is not None else ENV_FILE
+    try:
+        raw = path.read_text()
+    except OSError:
+        return []
+    applied: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.removeprefix("export ").strip()
+        if not key.isidentifier():
+            continue
+        value = value.strip()
+        # Strip one layer of matching quotes; leave inner characters alone.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not override and os.environ.get(key):
+            continue
+        os.environ[key] = value
+        applied.append(key)
+    return applied
 
 
 @dataclass(frozen=True)

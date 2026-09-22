@@ -106,6 +106,28 @@ def load_session() -> dict | None:
         return None
 
 
+def read_api_key(session: dict | None = None) -> str:
+    """API key for market-DATA calls: env first, else the saved session.
+
+    `credentials()` demands KITE_API_SECRET, but the secret is only needed to
+    exchange a request_token at login. Requiring it for reads meant a
+    perfectly valid saved session was treated as "no session" whenever the
+    secret was not exported, and every caller silently fell back to Yahoo.
+    A saved session already carries the api_key it was minted with, so reads
+    can proceed from that alone.
+    """
+    key = (os.environ.get("KITE_API_KEY") or "").strip()
+    if key:
+        return key
+    session = session if session is not None else load_session()
+    key = str((session or {}).get("api_key") or "").strip()
+    if not key:
+        raise KiteAuthError(
+            "no Kite API key — set KITE_API_KEY in your environment or .env, "
+            "or run `model_cli.py kite-login`")
+    return key
+
+
 def clear_session() -> bool:
     """Delete the cached session. Returns True if one existed."""
     try:

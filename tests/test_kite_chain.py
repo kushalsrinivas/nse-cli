@@ -69,6 +69,27 @@ class TestChainBuild(unittest.TestCase):
         self.assertIsNone(thin.rows[0].call.ltp)
         self.assertIsNone(thin.rows[0].call.iv)
 
+    def test_advertises_all_expiries_rendered_first(self):
+        """The chain must expose the whole expiry list, not just its own.
+
+        Publishing only the rendered expiry left the UI's expiry selector
+        with a single option, so any later series could only be reached by
+        falling back to the NSE scrape.
+        """
+        from data.kite.chain import build_chain
+        chain = build_chain(
+            "NIFTY", "2026-10-06", [23800.0], {}, 23800.0, 20.0,
+            expiries=["2026-09-29", "2026-10-06", "2026-10-13"])
+        # Rendered expiry leads; callers read expiries[0] as "what is here".
+        self.assertEqual(chain.expiries[0], "2026-10-06")
+        self.assertEqual(set(chain.expiries),
+                         {"2026-09-29", "2026-10-06", "2026-10-13"})
+        self.assertEqual(len(chain.expiries), 3, "no duplicate of the rendered expiry")
+        # Backwards compatible when no list is supplied.
+        self.assertEqual(
+            build_chain("NIFTY", "2026-10-06", [1.0], {}, 1.0, 5.0).expiries,
+            ("2026-10-06",))
+
     def test_attach_ivs_pure(self):
         from data.kite.chain import attach_ivs
         from data.options import ChainRow, OptionLeg

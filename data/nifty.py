@@ -7,6 +7,7 @@ caches results so we don't hammer the API.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
@@ -108,15 +109,33 @@ def _to_candles(df: pd.DataFrame) -> list[Candle]:
     ]
 
 
+def _finite(value: Any) -> float | None:
+    """float(value) when it is a real, non-zero-safe number, else None.
+
+    yfinance hands back float('nan') for fields it could not resolve, and
+    NaN is TRUTHY in Python: `nan or fallback` returns nan, and `x is None`
+    never catches it. That let NaN through into previous_close and poison
+    change/change_pct (both rendered as "nan" in the dashboard). Normalize
+    NaN/inf to None here so the existing None-guards actually fire.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def _build_quote(df: pd.DataFrame, info: dict[str, Any]) -> Quote:
     last = df.iloc[-1]
     price = float(last["close"])
-    prev_close_raw = info.get("regularMarketPreviousClose") or info.get("chartPreviousClose")
-    prev_close = float(prev_close_raw) if prev_close_raw else None
+    prev_close = (_finite(info.get("regularMarketPreviousClose"))
+                  or _finite(info.get("chartPreviousClose")))
 
     # Fall back to prior candle when the metadata lacks a previous close.
     if prev_close is None and len(df) > 1:
-        prev_close = float(df.iloc[-2]["close"])
+        prev_close = _finite(df.iloc[-2]["close"])
 
     change = round(price - prev_close, 2) if prev_close is not None else None
     change_pct = (

@@ -134,15 +134,27 @@ class InstrumentStore:
         return self._row(row) if row else None
 
     def find(self, exchange: str, tradingsymbol: str) -> InstrumentRow | None:
+        # Newest snapshot wins: the same tradingsymbol appears once per
+        # refresh, and tokens are reused after expiry.
         row = self.conn.execute(
-            "SELECT * FROM kite_instruments WHERE exchange=? AND tradingsymbol=?",
+            "SELECT * FROM kite_instruments WHERE exchange=? AND tradingsymbol=? "
+            "ORDER BY as_of DESC LIMIT 1",
             (exchange, tradingsymbol)).fetchone()
         return self._row(row) if row else None
 
     def scan(self, exchange: str | None = None,
              instrument_type: str | tuple[str, ...] | None = None,
-             prefix: str | None = None) -> list[InstrumentRow]:
-        """Filtered scan for resolvers (NFO universes are small)."""
+             prefix: str | None = None,
+             latest_only: bool = True) -> list[InstrumentRow]:
+        """Filtered scan for resolvers (NFO universes are small).
+
+        Every refresh appends a new `as_of` snapshot without deleting the
+        previous ones, so an unscoped scan returned contracts from every
+        master ever fetched — long-settled expiries resurfaced as if they
+        were live. `latest_only` pins the scan to the newest snapshot for
+        the exchange being scanned (NSE and NFO refresh independently, so
+        the bound must be per-exchange, not global).
+        """
         sql = "SELECT * FROM kite_instruments WHERE 1=1"
         params: list = []
         if exchange:
@@ -153,6 +165,13 @@ class InstrumentStore:
                 instrument_type = (instrument_type,)
             sql += f" AND instrument_type IN ({','.join('?' * len(instrument_type))})"
             params.extend(instrument_type)
+        if latest_only:
+            if exchange:
+                sql += (" AND as_of = (SELECT MAX(as_of) FROM kite_instruments "
+                        "WHERE exchange=?)")
+                params.append(exchange)
+            else:
+                sql += " AND as_of = (SELECT MAX(as_of) FROM kite_instruments)"
         rows = [self._row(r) for r in self.conn.execute(sql, params)]
         if prefix:
             rows = [r for r in rows if r.tradingsymbol.startswith(prefix)]

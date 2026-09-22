@@ -152,14 +152,53 @@ class TestInstrumentStore(unittest.TestCase):
 
 class TestResolvers(unittest.TestCase):
     def setUp(self):
+        from unittest.mock import patch
+
         from data.kite.store import InstrumentStore, normalize_dump_row
         self.tmp = tempfile.TemporaryDirectory()
         self.store = InstrumentStore(Path(self.tmp.name) / "k.db")
         self.store.upsert([normalize_dump_row(r, "2026-09-06")
                            for r in DUMP + OPT_DUMP])
+        # Expiry filtering is now clock-dependent, and the fixture's expiries
+        # are fixed dates. Freeze "today" before them so these assertions do
+        # not silently start failing once the real clock passes 2026-09-29.
+        self._clock = patch("data.kite.instruments._today",
+                            return_value="2026-09-06")
+        self._clock.start()
+        self.addCleanup(self._clock.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_expired_expiries_dropped(self):
+        from unittest.mock import patch
+
+        from data.kite.instruments import futures_chain, option_expiries
+        # Day after the fixture's near expiry: it must disappear from the
+        # tradable list (it lingers in the broker master after settlement).
+        with patch("data.kite.instruments._today", return_value="2026-09-30"):
+            self.assertEqual(option_expiries(self.store, "NIFTY"), [])
+            self.assertEqual(
+                option_expiries(self.store, "NIFTY", include_expired=True),
+                ["2026-09-29"])
+            self.assertEqual([f.expiry for f in futures_chain(self.store, "NIFTY")],
+                             ["2026-10-27"])
+        # On expiry day itself the series is still tradable.
+        with patch("data.kite.instruments._today", return_value="2026-09-29"):
+            self.assertEqual(option_expiries(self.store, "NIFTY"), ["2026-09-29"])
+
+    def test_scan_uses_newest_snapshot_only(self):
+        from data.kite.store import normalize_dump_row
+        # A contract present in an older master but absent from the newest
+        # one is delisted/settled; it must not resurface as tradable.
+        stale = _opt_row(999001, "", 23500, "CE")
+        stale["tradingsymbol"] = "NIFTY26SEP23500CE"
+        self.store.upsert([normalize_dump_row(stale, "2026-09-01")])
+        symbols = [r.tradingsymbol for r in self.store.scan(exchange="NFO")]
+        self.assertNotIn("NIFTY26SEP23500CE", symbols)
+        all_symbols = [r.tradingsymbol
+                       for r in self.store.scan(exchange="NFO", latest_only=False)]
+        self.assertIn("NIFTY26SEP23500CE", all_symbols)
 
     def test_underlying_match(self):
         from data.kite.instruments import underlying_match
