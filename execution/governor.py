@@ -85,7 +85,7 @@ class GovernorDecision:
 
 def _leg_value(legs, sides, spot: float, dte: float, iv_shift_pts: float) -> float:
     total = 0.0
-    for q, s in zip(legs, sides):
+    for q, s in zip(legs, sides, strict=True):
         iv = max((q.iv or 14.0) + iv_shift_pts, 1.0) / 100.0
         total += s * bs_price(spot, q.strike, max(dte, 0.01), iv, q.is_call)
     return total
@@ -121,49 +121,49 @@ class RiskGovernor:
 
     def hard_limits(self, setup, book: BookState) -> str:
         """'' when no limit blocks, else the first blocking reason."""
-        l = self.l
+        lim = self.l
         loss = -(book.realized_today + min(book.unrealized, 0.0))
-        if loss >= l.daily_loss_pct * book.equity:
-            return f"daily loss ₹{loss:,.0f} ≥ {l.daily_loss_pct:.1%} of equity"
-        if book.consecutive_losses >= l.max_consecutive_losses:
+        if loss >= lim.daily_loss_pct * book.equity:
+            return f"daily loss ₹{loss:,.0f} ≥ {lim.daily_loss_pct:.1%} of equity"
+        if book.consecutive_losses >= lim.max_consecutive_losses:
             return f"{book.consecutive_losses} consecutive losses — halted for the day"
-        if book.entries_today >= l.max_entries_per_session:
-            return f"{book.entries_today} entries today (max {l.max_entries_per_session})"
-        if book.open_total >= l.max_total_positions:
-            return f"{book.open_total} open positions (max {l.max_total_positions})"
-        cap = (l.max_intraday_positions if setup.horizon == "intraday"
-               else l.max_overnight_positions)
+        if book.entries_today >= lim.max_entries_per_session:
+            return f"{book.entries_today} entries today (max {lim.max_entries_per_session})"
+        if book.open_total >= lim.max_total_positions:
+            return f"{book.open_total} open positions (max {lim.max_total_positions})"
+        cap = (lim.max_intraday_positions if setup.horizon == "intraday"
+               else lim.max_overnight_positions)
         if book.open_by_horizon.get(setup.horizon, 0) >= cap:
             return f"max {setup.horizon} positions ({cap}) open"
         if setup.zone.zone_id in book.open_signal_zone_ids:
             return "zone already traded (one attempt per zone)"
         dir_used = book.open_risk_by_direction.get(setup.plan.direction, 0.0)
-        if dir_used >= l.max_direction_risk_pct * book.equity:
+        if dir_used >= lim.max_direction_risk_pct * book.equity:
             return f"{setup.plan.direction} exposure ₹{dir_used:,.0f} at limit"
         return ""
 
     def size(self, setup, choice, book: BookState, spot: float, now: datetime, *,
              vix: float, hold_days: float, dte_days: float) -> GovernorDecision:
-        l = self.l
+        lim = self.l
         block = self.hard_limits(setup, book)
         if block:
             return GovernorDecision(False, block)
         score = setup.score.total
         if score >= 85:
-            tier, risk_pct = "high", l.risk_high
+            tier, risk_pct = "high", lim.risk_high
         elif score >= 75:
-            tier, risk_pct = "normal", l.risk_normal
+            tier, risk_pct = "normal", lim.risk_normal
         else:
             return GovernorDecision(False, f"score {score:.0f} below sizing tiers", "none")
-        if dte_days <= l.near_expiry_days:
-            risk_pct *= l.near_expiry_scale
+        if dte_days <= lim.near_expiry_days:
+            risk_pct *= lim.near_expiry_scale
         budget = book.equity * risk_pct
-        dir_room = l.max_direction_risk_pct * book.equity - book.open_risk_by_direction.get(
+        dir_room = lim.max_direction_risk_pct * book.equity - book.open_risk_by_direction.get(
             setup.plan.direction, 0.0)
         budget = min(budget, max(dir_room, 0.0))
 
         lot = choice.lot_size
-        l_unit = stress_loss_per_unit(choice, setup, spot, now, vix=vix, limits=l,
+        l_unit = stress_loss_per_unit(choice, setup, spot, now, vix=vix, limits=lim,
                                       hold_days=hold_days)
         if l_unit <= 0:
             l_unit = max(abs(choice.o_entry) * 0.05, 0.05)   # never size on a zero loss
@@ -171,14 +171,16 @@ class RiskGovernor:
         by_risk = int(budget // per_lot) if per_lot > 0 else 0
         margin_unit = abs(choice.o_entry) if choice.o_entry > 0 else choice.max_loss_per_unit
         premium_lot = margin_unit * lot
-        deploy_cap = book.equity * l.max_premium_deploy_pct
+        deploy_cap = book.equity * lim.max_premium_deploy_pct
         by_deploy = int(deploy_cap // premium_lot) if premium_lot > 0 else by_risk
         expiry = choice.structure.expiry
-        exp_room = l.max_expiry_stress_pct * book.equity - book.open_stress_by_expiry.get(expiry, 0.0)
+        exp_room = lim.max_expiry_stress_pct * book.equity - book.open_stress_by_expiry.get(expiry, 0.0)
         by_expiry = int(max(exp_room, 0.0) // per_lot) if per_lot > 0 else 0
         lots = min(by_risk, by_deploy, by_expiry)
-        bound = min((by_risk, "risk_budget"), (by_deploy, "deploy_ceiling"),
-                    (by_expiry, "expiry_stress"))[1]
+        # Ties report the most fundamental limit first: risk budget, then the
+        # deploy ceiling, then per-expiry stress.
+        bound = min(((by_risk, 0, "risk_budget"), (by_deploy, 1, "deploy_ceiling"),
+                     (by_expiry, 2, "expiry_stress")))[2]
         dec = GovernorDecision(
             lots >= 1, "", tier, round(budget, 2), l_unit, round(per_lot, 2),
             max(lots, 0), lot, round(max(lots, 0) * per_lot, 2),

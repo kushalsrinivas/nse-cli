@@ -35,13 +35,22 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from model.forecast.distribution import EmpiricalShape, build_distribution, implied_distribution
+from model.forecast.distribution import (
+    EmpiricalShape,
+    build_distribution,
+    implied_distribution,
+)
 from model.forecast.options_edge import Leg, Structure, StructureEV, evaluate_structure
-from model.forecast.volatility import GAP_VARIANCE_SHARE, split_sigma, vix_to_daily_sigma
+from model.forecast.volatility import (
+    GAP_VARIANCE_SHARE,
+    split_sigma,
+    vix_to_daily_sigma,
+)
 from model.options_ev import bs_greeks, bs_price
 from model.order_blocks.types import BULLISH, Setup
 
 SESSION_MINUTES = 375.0
+_DEFAULT_SHAPE = EmpiricalShape.normal(1500)
 
 
 @dataclass(frozen=True)
@@ -117,7 +126,7 @@ class ContractChoice:
             "tradingsymbol": q.tradingsymbol, "side": "BUY" if s > 0 else "SELL",
             "qty": s, "strike": q.strike, "type": "CE" if q.is_call else "PE",
             "expiry": q.expiry, "bid": q.bid, "ask": q.ask, "iv": q.iv,
-        } for q, s in zip(self.legs, self.sides)])
+        } for q, s in zip(self.legs, self.sides, strict=True)])
 
 
 @dataclass
@@ -316,7 +325,9 @@ def select_contract(setup: Setup, chains: dict[str, list[LegQuote]], spot: float
     contract's lot size as of the trade date (master history), never config.
     """
     rules = rules or ContractRules()
-    shape = shape or EmpiricalShape.normal()
+    # 1,500 draws: EV and its CI are stable to a few rupees per lot, and a
+    # live decision must land inside the 15:15-15:25 window (4,000 took ~5 s).
+    shape = shape or _DEFAULT_SHAPE
     sel = Selection(None)
     sigma_implied = horizon_sigma_pct(setup.horizon, vix, now, rules)
     loc, loc_src = location_pct(setup, spot, p_win)

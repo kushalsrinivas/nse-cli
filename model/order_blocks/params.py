@@ -82,5 +82,5 @@ GRID = {
 def grid(base: ObParams | None = None) -> list[ObParams]:
     base = base or ObParams()
     keys = list(GRID)
-    return [replace(base, **dict(zip(keys, combo)))
+    return [replace(base, **dict(zip(keys, combo, strict=True)))
             for combo in itertools.product(*(GRID[k] for k in keys))]

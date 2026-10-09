@@ -68,7 +68,7 @@ _VERSIONED = ("instrument_token", "instrument_type", "expiry", "strike",
               "lot_size", "tick_size")
 
 
-def tracks_history(r: "InstrumentRow") -> bool:
+def tracks_history(r: InstrumentRow) -> bool:
     """True for rows kite_instrument_history should version."""
     if r.exchange == "NSE":
         return r.tradingsymbol in HISTORY_INDEX_SYMBOLS

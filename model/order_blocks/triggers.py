@@ -17,7 +17,15 @@ from datetime import timedelta
 
 from model.order_blocks.params import ObParams
 from model.order_blocks.swings import SwingTracker
-from model.order_blocks.types import BULLISH, TF_MINUTES, TOUCHED, Bar, Swing, TradePlan, Zone
+from model.order_blocks.types import (
+    BULLISH,
+    TF_MINUTES,
+    TOUCHED,
+    Bar,
+    Swing,
+    TradePlan,
+    Zone,
+)
 
 
 class IntradayWatch:

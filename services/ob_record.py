@@ -37,7 +37,7 @@ def _in_open_window(now: datetime) -> bool:
 
 
 async def record_loop(recorder, client, *, minutes: float,
-                      snapshot_every: float = 60.0, on_status=None,
+                      snapshot_every: float = 60.0, on_status=None, on_second=None,
                       clock=datetime.now, sleep=asyncio.sleep) -> None:
     """Drive an already-planned recorder on a running KiteWS client."""
     loop = asyncio.get_running_loop()
@@ -47,6 +47,8 @@ async def record_loop(recorder, client, *, minutes: float,
         await sleep(1.0)
         t = loop.time()
         now = clock()
+        if on_second is not None:
+            on_second(now)
         every = OPEN_SNAPSHOT_EVERY if _in_open_window(now) else snapshot_every
         if t - last_snap >= every:
             reason = "open_snapshot" if _in_open_window(now) else "periodic"

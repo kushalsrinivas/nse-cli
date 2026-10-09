@@ -119,7 +119,7 @@ class Zone:
     def live(self) -> bool:
         return self.status in LIVE_STATES
 
-    def overlap_frac(self, other: "Zone") -> float:
+    def overlap_frac(self, other: Zone) -> float:
         """Overlap as a fraction of THIS zone's width."""
         lo = max(self.zone_low, other.zone_low)
         hi = min(self.zone_high, other.zone_high)

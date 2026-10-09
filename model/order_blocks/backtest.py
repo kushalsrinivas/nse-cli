@@ -484,7 +484,7 @@ def verdict(res: RunResult, horizon: str, grid_positive_frac: float | None = Non
     # Bands need every score, so they are read off B2 (all setups, no gate).
     bands = metrics(res.by_horizon(horizon, "B2"), res.sessions).get("score_bands", {})
     order = [bands[k]["mean_r"] for k in ("<60", "60-74", "75-84", "85+") if k in bands]
-    mono = len(order) >= 2 and all(a <= b for a, b in zip(order, order[1:]))
+    mono = len(order) >= 2 and all(a <= b for a, b in zip(order, order[1:], strict=False))
     checks.append(("score bands monotonic", mono, json.dumps(bands)))
     return Verdict(horizon, all(p for _, p, _ in checks), checks)
 
@@ -511,7 +511,7 @@ def run_grid(bars, base: ObParams | None = None, *, cost_points: float = DEFAULT
 
 def isotonic_fit(x: list[float], y: list[int]) -> list[tuple[float, float]]:
     """Pool-adjacent-violators. Returns [(score_upper, p)] steps."""
-    pairs = sorted(zip(x, y))
+    pairs = sorted(zip(x, y, strict=True))
     blocks = [[s, s, float(v), 1] for s, v in pairs]   # lo, hi, sum, n
     i = 0
     while i < len(blocks) - 1:
@@ -721,7 +721,9 @@ def summarize(res: RunResult, *, grid_frac: float | None = None,
     if options is not None:
         out["options"] = options
     if calibration is not None:
-        out["calibration"] = {k: v for k, v in calibration.items() if k != "steps"}
+        # Steps are kept: the live service reads them back to map score → P(win)
+        # once calibration has positive Brier skill (§4.4).
+        out["calibration"] = dict(calibration)
     return out
 
 

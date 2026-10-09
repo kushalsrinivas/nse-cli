@@ -122,6 +122,188 @@ def register(sub) -> dict:
     return cmds
 
 
+# ---------------------------------------------------------------------------
+# Signals / paper trading / backtest
+# ---------------------------------------------------------------------------
+
+def _laya(args):
+    if not getattr(args, "laya", False) and not getattr(args, "laya_enforce", False):
+        return None
+    try:
+        from model.laya_filter import LayaFilter
+        return LayaFilter()
+    except Exception as exc:
+        console.print(f"[yellow]laya unavailable: {exc}[/]")
+        return None
+
+
+def cmd_ob(args) -> int:
+    from data.kite.auth import KiteAuthError
+    from model.order_blocks.view import setup_card, zones_table
+    from services.order_blocks import scan
+
+    try:
+        res = scan(days=args.days, record=args.journal, events=args.event,
+                   laya=_laya(args), laya_enforce=args.laya_enforce)
+    except (KiteAuthError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/]")
+        return 1
+    for n in res.notices:
+        console.print(f"[yellow]{n}[/]")
+    console.print(f"[bold]NIFTY[/] {res.spot}  VIX {res.vix}  · engine {res.engine_counters}")
+    if res.evidence:
+        console.print(f"[dim]{res.evidence.note}; promoted: {res.evidence.promoted}[/]")
+    console.print(zones_table(res.zones))
+    if not res.evaluations:
+        today = len(res.recent_setups)
+        console.print(f"[dim]no fresh setup to evaluate ({today} setup(s) earlier today)[/]")
+    for ev in res.evaluations:
+        console.print(setup_card(ev))
+    if not args.journal and res.evaluations:
+        console.print("[dim]dry-run: pass --journal to record signals[/]")
+    return 0
+
+
+def cmd_ob_paper(args) -> int:
+    from data.kite.auth import KiteAuthError
+    from services.order_blocks import run_paper
+
+    def _status(now, paper, rec) -> None:
+        if args.verbose:
+            console.print(f"[dim]{now:%H:%M:%S} spot={rec.spot()} {paper.counters}[/]")
+
+    console.print("[bold]ob-paper[/]: PAPER ONLY — no order reaches Kite")
+    try:
+        out = run_paper(minutes=args.minutes, events=args.event, laya=_laya(args),
+                        laya_enforce=args.laya_enforce, warmup_days=args.warmup_days,
+                        on_status=_status)
+    except (KiteAuthError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/]")
+        return 1
+    console.print(out)
+    return 0
+
+
+def cmd_ob_journal(args) -> int:
+    from journal.ob_db import ObJournal
+    from model.order_blocks.view import positions_table, signals_table
+
+    j = ObJournal()
+    mode = "backtest" if args.backtest else "live"
+    console.print(signals_table(j.signals(decision=args.decision, horizon=args.horizon,
+                                          mode=mode, limit=args.limit)))
+    console.print(positions_table(j.positions(mode=mode, limit=args.limit)))
+    if args.runs:
+        for r in j.runs():
+            console.print(f"{r['run_id']}  {r['data_from']} → {r['data_to']}  "
+                          f"layer={r['option_layer']}  sha={r['git_sha']}")
+    return 0
+
+
+def cmd_ob_settle(args) -> int:
+    from journal.ob_db import ObJournal
+    from services.order_blocks import settle_manual
+
+    pos = settle_manual(ObJournal(), args.position_id, args.exit_net)
+    if pos is None:
+        console.print("[red]no OPEN paper position with that id[/]")
+        return 1
+    console.print(f"settled {pos.position_id}: net ₹{pos.net_pnl:+,.0f} "
+                  f"(R {pos.r_multiple})")
+    return 0
+
+
+def cmd_ob_backtest(args) -> int:
+    import json
+    from datetime import date, timedelta
+
+    from model.order_blocks.params import ObParams
+    from model.order_blocks.view import backtest_panels
+    from services.order_blocks import run_backtest
+
+    to = args.to or date.today().isoformat()
+    frm = args.frm or (date.fromisoformat(to) - timedelta(days=365)).isoformat()
+    out = run_backtest(frm=frm, to=to, params=ObParams(), cost_points=args.cost_points,
+                       with_grid=args.grid, options=not args.no_options,
+                       persist_trades=not args.no_persist)
+    for n in out.notices:
+        console.print(f"[yellow]{n}[/]")
+    if not out.summary:
+        return 1
+    console.print(f"[bold]{out.run_id}[/] {frm} → {to} · {out.summary.get('sessions')} sessions "
+                  f"· {out.summary.get('setups')} setups · params {out.summary.get('params_hash')}")
+    for panel in backtest_panels(out.summary):
+        console.print(panel)
+    if out.grid_rows:
+        pos = sum(1 for r in out.grid_rows if r["n"] and r["expectancy_r"] > 0)
+        console.print(f"grid: {pos}/{len(out.grid_rows)} configs positive")
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(out.summary, fh, indent=2, default=str)
+        console.print(f"[dim]wrote {args.json}[/]")
+    return 0
+
+
+def cmd_ob_kill(args) -> int:
+    from execution import kill_switch
+
+    if args.off:
+        released = kill_switch.release()
+        console.print("[green]kill switch released[/]" if released else "kill switch was not engaged")
+        return 0
+    path = kill_switch.engage(args.reason)
+    console.print(f"[red]kill switch ENGAGED[/] ({path}) — no new paper entries; open "
+                  "positions flatten at the next bar")
+    return 0
+
+
 def _register_trading(sub) -> dict:
-    """Signal / paper / backtest commands (defined below)."""
-    return {}
+    ob = sub.add_parser("ob", help="order-block scan: zones + fresh setups (dry-run default)")
+    ob.add_argument("--days", type=int, default=30, help="replay window (default 30)")
+    ob.add_argument("--journal", action="store_true", help="record zones + signals")
+    ob.add_argument("--event", action="append", default=[],
+                    help="event that blocks entries today (repeatable), e.g. 'RBI policy'")
+    ob.add_argument("--laya", action="store_true", help="Laya second opinion (shadow)")
+    ob.add_argument("--laya-enforce", action="store_true", help="apply Laya vetoes")
+
+    pp = sub.add_parser("ob-paper", help="live paper session: WS → engine → paper broker")
+    pp.add_argument("--minutes", type=float, default=375)
+    pp.add_argument("--warmup-days", type=int, default=30)
+    pp.add_argument("--event", action="append", default=[])
+    pp.add_argument("--laya", action="store_true")
+    pp.add_argument("--laya-enforce", action="store_true")
+    pp.add_argument("--verbose", action="store_true")
+
+    oj = sub.add_parser("ob-journal", help="order-block signals and paper positions")
+    oj.add_argument("--decision", default=None, choices=("GO", "WATCH", "NO-GO", "SHADOW"))
+    oj.add_argument("--horizon", default=None, choices=("intraday", "overnight"))
+    oj.add_argument("--backtest", action="store_true", help="show backtest rows instead")
+    oj.add_argument("--runs", action="store_true", help="list backtest runs")
+    oj.add_argument("--limit", type=int, default=50)
+
+    st = sub.add_parser("ob-settle", help="manually close a paper position")
+    st.add_argument("position_id")
+    st.add_argument("exit_net", type=float, help="net premium per unit at exit")
+
+    bt = sub.add_parser("ob-backtest", help="order-block backtest + baselines + verdict")
+    bt.add_argument("--from", dest="frm", default=None, help="YYYY-MM-DD (default: to - 365d)")
+    bt.add_argument("--to", default=None, help="YYYY-MM-DD (default: today)")
+    bt.add_argument("--cost-points", type=float, default=None,
+                    help="round-trip cost in index points (default 2.0)")
+    bt.add_argument("--grid", action="store_true", help="run the 81-config robustness grid")
+    bt.add_argument("--no-options", action="store_true", help="skip the option layer")
+    bt.add_argument("--no-persist", action="store_true", help="do not write trades to the journal")
+    bt.add_argument("--json", default=None, help="write the summary JSON here")
+
+    k = sub.add_parser("ob-kill", help="engage / release the paper-trading kill switch")
+    k.add_argument("--off", action="store_true")
+    k.add_argument("--reason", default="manual")
+
+    return {
+        "ob": cmd_ob,
+        "ob-paper": cmd_ob_paper,
+        "ob-journal": cmd_ob_journal,
+        "ob-settle": cmd_ob_settle,
+        "ob-backtest": cmd_ob_backtest,
+        "ob-kill": cmd_ob_kill,
+    }

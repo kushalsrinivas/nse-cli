@@ -121,7 +121,7 @@ def select_legs(store, spot: float, *, n_expiries: int = 2, wings: int = 10,
             continue
         if centre is None:
             centre = atm
-            diffs = [b - a for a, b in zip(ladder, ladder[1:]) if b > a]
+            diffs = [b - a for a, b in zip(ladder, ladder[1:], strict=False) if b > a]
             step = min(diffs) if diffs else None
         wanted = set(ladder)
         for otype in ("CE", "PE"):
@@ -148,6 +148,10 @@ class LegRecorder:
         self.latest: dict[int, dict] = {}
         self.centre: float | None = None
         self.step: float | None = None
+        #: tokens that must stay subscribed through re-centring (open positions)
+        self.pinned: dict[int, LegSpec] = {}
+        #: called with each batch of settled spot/FUT1 SeriesBars
+        self.on_series = None
         self.counters = {"ticks": 0, "bars_series": 0, "bars_options": 0,
                          "quotes": 0, "recentres": 0, "unknown_token": 0}
 
@@ -159,6 +163,7 @@ class LegRecorder:
                                          n_expiries=self.n_expiries,
                                          wings=self.wings, today=today)
         new = {leg.token: leg for leg in legs}
+        new.update(self.pinned)
         add = sorted(set(new) - set(self.legs))
         drop = sorted(set(self.legs) - set(new))
         if self.legs:
@@ -167,6 +172,24 @@ class LegRecorder:
         self.known.update(new)
         self.centre, self.step = centre, step
         return add, drop
+
+    def pin(self, leg: LegSpec) -> bool:
+        """Keep a leg subscribed regardless of the ladder. True if newly added."""
+        self.pinned[leg.token] = leg
+        self.known[leg.token] = leg
+        if leg.token in self.legs:
+            return False
+        self.legs[leg.token] = leg
+        return True
+
+    def unpin(self, token: int) -> None:
+        self.pinned.pop(token, None)
+
+    def leg_by_symbol(self, tradingsymbol: str) -> LegSpec | None:
+        for leg in self.known.values():
+            if leg.tradingsymbol == tradingsymbol:
+                return leg
+        return None
 
     def needs_recentre(self, spot: float) -> bool:
         if self.centre is None or not self.step:
@@ -221,6 +244,8 @@ class LegRecorder:
         if series:
             n += self.archive.upsert_series(series)
             self.counters["bars_series"] += len(series)
+            if self.on_series is not None:
+                self.on_series(series)
         if options:
             n += self.archive.upsert_option_bars(options)
             self.counters["bars_options"] += len(options)
