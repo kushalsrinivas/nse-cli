@@ -88,6 +88,7 @@ fetchers is the degrade-don't-crash design.
 - `docs/STOCK_OVERNIGHT.md` — per-stock engine, lots, journal, caveats
 - `docs/KITE.md` — Kite service: commands, data audit, production rules
 - `docs/LAYA.md` — Laya veto filter: questions, policy, shadow mode, evaluation
+- `docs/ORDER_BLOCKS.md` — order-block system design (NIFTY options, paper-only): schemas, detection, scoring, backtest, risk, Kite wiring
 
 ## Known limitations (honest)
 
