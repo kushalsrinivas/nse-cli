@@ -228,3 +228,23 @@ def build_dataset(candles, macro: dict | None = None, *,
     return Dataset(frame=out, features=features, decision_point=decision_point,
                    macro_cols=macro_cols, domestic_cols=domestic_cols,
                    breadth_cols=breadth_cols)
+
+
+def build_live_row(candles, macro: dict | None, *, target_date) -> pd.Series:
+    """Features available before `target_date`'s NIFTY session opens.
+
+    Historical rows are indexed by completed NIFTY sessions. A premarket
+    run needs a separate row for today: the last close's domestic state plus
+    the latest macro bars strictly before the target date.
+    """
+    from model.backtest import _base_frame
+
+    frame = _base_frame(candles)
+    domestic = _domestic(frame).iloc[-1].copy()
+    domestic["d_dow"] = pd.Timestamp(target_date).dayofweek
+    out = pd.DataFrame([domestic], index=pd.DatetimeIndex([target_date]))
+    if macro:
+        from model.macro import macro_feature_frame
+        mf = macro_feature_frame(pd.DatetimeIndex([target_date]), macro)
+        out = out.join(mf.add_prefix("g_"))
+    return out.iloc[0]

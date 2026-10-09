@@ -111,6 +111,21 @@ class TestFeatureLegality(unittest.TestCase):
         self.assertEqual(self.eod.tradeable_target, "gap_pct")
         self.assertEqual(self.pre.tradeable_target, "session_pct")
 
+    def test_live_premarket_row_uses_current_target_date(self):
+        from model.forecast.features import build_live_row
+
+        candles = _candles(300)
+        target = candles[-1].timestamp.date() + timedelta(days=1)
+        macro = {"spx": pd.Series(
+            [100.0, 110.0, 121.0],
+            index=pd.DatetimeIndex([target - timedelta(days=2),
+                                    target - timedelta(days=1), target]))}
+        row = build_live_row(candles, macro, target_date=target)
+        expected_ret = ((candles[-1].close / candles[-2].close) - 1) * 100
+        self.assertAlmostEqual(row["d_ret1"], expected_ret)
+        self.assertAlmostEqual(row["g_spx_ret"], 10.0)
+        self.assertEqual(row["d_dow"], target.weekday())
+
 
 class TestHarness(unittest.TestCase):
     def test_walk_forward_never_trains_on_the_test_block(self):

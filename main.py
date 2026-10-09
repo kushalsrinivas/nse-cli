@@ -174,7 +174,7 @@ def cmd_data_check(args) -> int:
         return 1
     newest = result.candles[-1] if result.candles else None
     print(f"bars: {len(result.candles)} ({period}/{args.interval}), "
-          f"cached={result.from_cache}")
+          f"source={result.source}, cached={result.from_cache}")
     if newest:
         print(f"newest bar: {newest.timestamp} close={newest.close:,.2f}")
     q = result.quote
@@ -191,7 +191,9 @@ def cmd_tonight(args) -> int:
     ns = types.SimpleNamespace(
         period=args.period or "2y", cperiod=args.cperiod, event=args.event,
         verbose=args.verbose, journal=args.journal,
-        no_breadth=args.no_breadth, source=args.source)
+        no_breadth=args.no_breadth, source=args.source,
+        laya=getattr(args, "laya", False),
+        laya_enforce=getattr(args, "laya_enforce", False))
     return model_cli.cmd_tonight(ns)
 
 

@@ -136,7 +136,8 @@ def assess_trade(best, *, min_edge: float = MIN_EDGE_RUPEES) -> TradeView:
                      source=best.structure.name, blocking=blocking)
 
 
-def size_trade(best, settings, *, tier_risk_pct: float | None = None) -> RiskView:
+def size_trade(best, settings, *, tier_risk_pct: float | None = None,
+               risk_budget_rupees: float | None = None) -> RiskView:
     """Size on the structure's own tail loss, not on a premium-stop fiction.
 
     The audited sizer derived risk from a percentage stop on the premium,
@@ -152,7 +153,11 @@ def size_trade(best, settings, *, tier_risk_pct: float | None = None) -> RiskVie
         return RiskView(False, reason="structure has no measurable downside — "
                                       "check the payoff model")
     risk_pct = tier_risk_pct if tier_risk_pct is not None else settings.risk_normal
-    budget = settings.account_equity * risk_pct
+    if risk_budget_rupees is None:
+        budget = settings.account_equity * risk_pct
+    else:
+        budget = min(max(float(risk_budget_rupees), 0.0), settings.account_equity)
+        risk_pct = budget / settings.account_equity if settings.account_equity else 0.0
     by_risk = int(budget // worst)
 
     entry = abs(best.structure.net_debit) * settings.lot_size
@@ -164,14 +169,17 @@ def size_trade(best, settings, *, tier_risk_pct: float | None = None) -> RiskVie
         # Say what it would take. "Too small" on its own leaves the user
         # unable to tell whether the edge is absent or merely unreachable
         # at this account size — a materially different situation.
-        need_equity = worst / risk_pct
         need_pct = worst / settings.account_equity
+        reason = (f"one lot risks ₹{worst:,.0f}, above the ₹{budget:,.0f} budget "
+                  f"({risk_pct:.1%} of ₹{settings.account_equity:,.0f}).")
+        if risk_budget_rupees is None and risk_pct > 0:
+            need_equity = worst / risk_pct
+            reason += (f" This edge needs ~₹{need_equity:,.0f} of equity at "
+                       f"{risk_pct:.1%} risk, or {need_pct:.1%} risk at the "
+                       "current size — the edge is real but out of reach, "
+                       "not absent")
         return RiskView(False, reason=(
-            f"one lot risks ₹{worst:,.0f}, above the ₹{budget:,.0f} budget "
-            f"({risk_pct:.1%} of ₹{settings.account_equity:,.0f}). "
-            f"This edge needs ~₹{need_equity:,.0f} of equity at {risk_pct:.1%} "
-            f"risk, or {need_pct:.1%} risk at the current size — "
-            f"the edge is real but out of reach, not absent"))
+            reason))
     _ = RiskManager(settings=settings)       # limits live here when state is real
     return RiskView(True, contracts=contracts,
                     max_risk_rupees=round(contracts * worst, 2),

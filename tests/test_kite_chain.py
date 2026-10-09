@@ -5,7 +5,7 @@ Offline throughout (synthetic quotes/frames, temp DBs, fake REST).
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -144,7 +144,8 @@ def _store_with_nifty(tmp):
          "tick_size": 0.05, "lot_size": 75, "instrument_type": "EQ",
          "segment": "NSE", "exchange": "NSE"},
         {"instrument_token": 2, "exchange_token": 2, "tradingsymbol": "NIFTY26SEPFUT",
-         "name": "NIFTY", "last_price": 0, "expiry": datetime(2026, 9, 29).date(),
+         "name": "NIFTY", "last_price": 0,
+         "expiry": datetime.now().date() + timedelta(days=30),
          "strike": 0, "tick_size": 0.05, "lot_size": 75, "instrument_type": "FUT",
          "segment": "NFO", "exchange": "NFO"},
     ]

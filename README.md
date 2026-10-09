@@ -27,7 +27,8 @@ with a session — see below).
 | `model_cli.py stock-overnight [--symbol X] [--lots N]` | Naked CE/PE overnight per stock, ranked GO table (separate journal) |
 | `model_cli.py evaluate / backtest / optimize / journal` | Score now · walk-forward report · fit weights · review setups |
 | `model_cli.py breadth / breadth-backtest` | Constituent snapshot · NIFTY-only vs NIFTY+breadth ablation |
-| `model_cli.py premarket` | 08:30 IST pre-market card: gap forecast, distribution, levels, structures |
+| `model_cli.py premarket` | 08:30 IST card; always journals a paper candidate separately from the model verdict |
+| `model_cli.py premarket-journal` | Review forced/model paper candidates and data-blocked runs |
 | `model_cli.py premarket --exit 23100CE@223.55` | Price a position you already hold: exit at the open, or hold? |
 | `model_cli.py forecast-eval` | Score the forecast stack + the incumbent engine on the harness |
 | `tonight --laya` · `premarket --laya` · `laya` · `laya-eval` | Laya veto filter on the overnight/premarket cards and Setups A/B/C (shadow default; `--laya-enforce` applies) |
@@ -39,6 +40,13 @@ All decision commands — `tonight`, `overnight`, `confluence` — are
 **dry-run by default** (`--journal` records).
 `tonight` never lifts a sub-threshold setup on breadth alone, and breadth
 filters can only veto, never create, a trade.
+
+`premarket` records one paper-run row on every invocation. Its forced paper
+candidate is not a model GO: the genuine verdict and any failed gates remain
+visible, and stale data, missing structures, or a risk-budget failure are
+journaled without opening a paper position. The premarket maximum modeled loss
+is ₹20,000 per position (4% of the default ₹500,000 account setting). This is
+paper-only; no order is placed.
 
 ## Architecture
 

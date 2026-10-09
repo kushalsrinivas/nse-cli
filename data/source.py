@@ -187,7 +187,6 @@ def get_nifty_history(period=None, interval=None, symbol: str = SETTINGS.symbol,
     try:
         from data.kite import instruments as ki
         from data.kite.rest import KiteRest
-        from data.kite.store import InstrumentStore
 
         rest, store = KiteRest(), ensure_master()
         token = ki.nifty_spot_token(store)
@@ -209,7 +208,8 @@ def get_nifty_history(period=None, interval=None, symbol: str = SETTINGS.symbol,
             volume=None, fetched_at=now)
         log.info("nifty history via kite (%d bars)", len(candles))
         return HistoryResult(candles=candles, quote=quote, period=period,
-                             interval=interval, fetched_at=now, from_cache=False)
+                             interval=interval, fetched_at=now, from_cache=False,
+                             source="kite")
     except Exception as exc:
         log.warning("kite nifty history failed (%s); yahoo fallback", exc)
         return nifty.fetch_history(period=period, interval=interval,
@@ -254,7 +254,6 @@ def get_futures_snapshot(underlying: str):
     try:
         from data.kite import instruments as ki
         from data.kite.rest import KiteRest
-        from data.kite.store import InstrumentStore
 
         rest, store = KiteRest(), ensure_master()
         futs = ki.futures_chain(store, underlying)
@@ -316,7 +315,6 @@ def get_nifty_chain(expiry=None, use_cache: bool = True,
     try:
         from data.kite.chain import KiteChainProvider
         from data.kite.rest import KiteRest
-        from data.kite.store import InstrumentStore
 
         rest, store = KiteRest(), ensure_master()
         ltp = rest.ltp(["NSE:NIFTY 50"])
@@ -345,7 +343,6 @@ def get_stock_chain(short: str, expiry=None, use_cache: bool = True,
     try:
         from data.kite.chain import KiteChainProvider
         from data.kite.rest import KiteRest
-        from data.kite.store import InstrumentStore
 
         rest, store = KiteRest(), ensure_master()
         ltp = rest.ltp([f"NSE:{short}"])
@@ -396,7 +393,6 @@ def get_india_vix(source: str = SOURCE_AUTO):
     if use_kite:
         try:
             from data.kite.rest import KiteRest
-            from data.kite.store import InstrumentStore
 
             rest, store = KiteRest(), ensure_master()
             row = store.find("NSE", "INDIA VIX")

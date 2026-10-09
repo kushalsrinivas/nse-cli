@@ -386,92 +386,177 @@ def cmd_tonight(args) -> int:
 
 def cmd_premarket(args) -> int:
     """08:30 IST pre-market decision from the evaluated forecast stack."""
+    from datetime import datetime
+
     from data import source
-    from model.forecast.engine import build_premarket
+    from journal.premarket_db import shared_premarket_journal
+    from model.forecast.engine import build_premarket, premarket_history_issue
     from model.forecast.report import render_premarket
     from model.macro import fetch_macro_history
 
-    result = source.get_nifty_history(period=args.period)
-    chain = None
+    paper_journal = shared_premarket_journal()
+    run_at = datetime.now()
+    result = chain = out = None
+    journaled = False
     try:
-        chain = source.get_nifty_chain(source=args.source)
-    except Exception as exc:
-        console.print(f"[yellow]option chain unavailable: {exc}[/]")
-    macro = None
-    try:
-        macro = fetch_macro_history("5y")
-    except Exception as exc:
-        console.print(f"[yellow]macro unavailable ({exc}) — the gap model, "
-                      f"which is the one measured edge here, will be absent[/]")
-    vix = None
-    try:
-        level, _ = source.get_india_vix()
-        vix = level or None
-    except Exception:
-        pass
-
-    out = build_premarket(result.candles, chain=chain, macro=macro,
-                          vix_level=vix)
-    laya_run = None
-    if args.laya or args.laya_enforce:
-        from datetime import date
-
-        from model.laya_filter.cards import premarket_state, veto_premarket
-        from services.laya import judge_card
-        laya_run = judge_card(
-            premarket_state(out, vix=vix), enforce=args.laya_enforce,
-            journal=args.journal, run_id=f"PM-{date.today().isoformat()}",
-            apply_veto=lambda v: veto_premarket(out, v))
-    render_premarket(out, console)
-    if laya_run is not None:
-        _notice_print(laya_run.notices)
-        _render_laya(laya_run)
-
-    if args.exit:
-        from model.forecast.position import (
-            PositionSpecError,
-            attach_ivs,
-            evaluate_exit,
-            measure_overnight_iv_change,
-            parse_leg,
-            render_exit,
-        )
-        from model.options_ev import days_to_expiry
-        try:
-            legs = [parse_leg(spec) for spec in args.exit]
-        except PositionSpecError as exc:
-            console.print(f"[red]{exc}[/]")
+        result = source.get_nifty_history(period=args.period, source=args.source)
+        if args.source == "kite" and result.source != "kite":
+            note = f"requested Kite history, but the router used {result.source}"
+            rec = paper_journal.record_run(
+                history=result, requested_source=args.source,
+                status="BLOCKED_SOURCE_MISMATCH", note=note, at=run_at)
+            console.print(f"[red]PREMARKET BLOCKED: {note}[/]")
+            console.print(f"[dim]journaled run #{rec.id}; no paper entry[/]")
             return 1
-        expiry = args.expiry or (chain.expiries[0] if chain
-                                 and chain.expiries else "")
-        dte = days_to_expiry(expiry) if expiry else 7
-        if not expiry:
-            console.print("[yellow]no expiry known — assuming 7 DTE; pass "
-                          "--expiry YYYY-MM-DD to be exact[/]")
-        legs = attach_ivs(legs, chain, out.spot, dte)
+        stale = premarket_history_issue(result.candles, today=run_at.date())
+        if stale:
+            rec = paper_journal.record_run(
+                history=result, requested_source=args.source,
+                status="BLOCKED_STALE_DATA", note=stale, at=run_at)
+            journaled = True
+            console.print(f"[red]PREMARKET BLOCKED: {stale}[/]")
+            console.print(f"[dim]journaled run #{rec.id}; no paper entry[/]")
+            return 1
 
-        entry_wd = result.candles[-1].timestamp.weekday()
-        vix_hist = None
-        if macro and "indiavix" in macro:
-            vix_hist = macro["indiavix"]
-        iv_chg, _iv_sd, iv_note = measure_overnight_iv_change(vix_hist, entry_wd)
+        try:
+            chain = source.get_nifty_chain(source=args.source, use_cache=False)
+        except Exception as exc:
+            console.print(f"[yellow]option chain unavailable: {exc}[/]")
+        if args.source == "kite" and chain is not None \
+                and chain.source != "kite-assembled":
+            note = f"requested Kite options, but the router used {chain.source}"
+            rec = paper_journal.record_run(
+                history=result, chain=chain, requested_source=args.source,
+                status="BLOCKED_SOURCE_MISMATCH", note=note, at=run_at)
+            console.print(f"[red]PREMARKET BLOCKED: {note}[/]")
+            console.print(f"[dim]journaled run #{rec.id}; no paper entry[/]")
+            return 1
+        macro = None
+        try:
+            macro = fetch_macro_history("5y")
+        except Exception as exc:
+            console.print(f"[yellow]macro unavailable ({exc}) — the gap model, "
+                          f"which is the one measured edge here, will be absent[/]")
+        vix = None
+        try:
+            level, _ = source.get_india_vix()
+            vix = level or None
+        except Exception:
+            pass
 
-        # The gap distribution is what prices an exit at the open; the
-        # session distribution is only needed to price holding past it.
-        from model.forecast.distribution import build_distribution
-        gap_loc = out.gap.expected_pct if out.gap and out.gap.available else 0.0
-        gap_scale = (out.gap.sigma_pct if out.gap and out.gap.available
-                     else out.vol.sigma_gap_pct)
-        gap_dist = build_distribution(
-            gap_scale, "gap", out.decision.market.distribution.shape,
-            location_pct=gap_loc,
-            location_source="gap model (AUC 0.748 out of sample)")
+        out = build_premarket(result.candles, chain=chain, macro=macro,
+                              vix_level=vix)
+        latest_bar = result.candles[-1].timestamp.date()
+        chain_source = chain.source if chain is not None else "unavailable"
+        console.print(f"[dim]inputs: NIFTY {result.source} through {latest_bar}"
+                      f"{' (cached)' if result.from_cache else ''} · "
+                      f"options {chain_source}[/]")
+        laya_run = None
+        if args.laya or args.laya_enforce:
+            from model.laya_filter.cards import premarket_state, veto_premarket
+            from services.laya import judge_card
+            laya_run = judge_card(
+                premarket_state(out, vix=vix), enforce=args.laya_enforce,
+                journal=args.journal, run_id=f"PM-{run_at.date().isoformat()}",
+                apply_veto=lambda v: veto_premarket(out, v))
+            out.paper_forced = bool(out.paper_candidate is not None and (
+                not out.decision.trade.has_edge or not out.decision.risk.allowed))
 
-        console.print()
-        render_exit(evaluate_exit(
-            legs, out.spot, gap_dist, out.decision.market.distribution, dte,
-            lots=args.lots, lot_size=SETTINGS.lot_size,
-            iv_change_pts=iv_chg, iv_change_note=iv_note), console)
+        paper_entry = not bool(args.exit)
+        rec = paper_journal.record_run(
+            history=result, chain=chain, result=out, requested_source=args.source,
+            status="EXIT_ANALYSIS_ONLY" if not paper_entry else None,
+            note="position exit analysis; no new paper entry" if not paper_entry else "",
+            at=run_at, paper_entry=paper_entry)
+        journaled = True
+        console.print(f"[dim]paper run journaled #{rec.id} ({rec.paper_status})[/]")
+        render_premarket(out, console, show_paper=paper_entry)
+        if laya_run is not None:
+            _notice_print(laya_run.notices)
+            _render_laya(laya_run)
+
+        if args.exit:
+            from model.forecast.position import (
+                PositionSpecError,
+                attach_ivs,
+                evaluate_exit,
+                measure_overnight_iv_change,
+                parse_leg,
+                render_exit,
+            )
+            from model.options_ev import days_to_expiry
+            try:
+                legs = [parse_leg(spec) for spec in args.exit]
+            except PositionSpecError as exc:
+                console.print(f"[red]{exc}[/]")
+                return 1
+            expiry = args.expiry or (chain.expiries[0] if chain
+                                     and chain.expiries else "")
+            dte = days_to_expiry(expiry) if expiry else 7
+            if not expiry:
+                console.print("[yellow]no expiry known — assuming 7 DTE; pass "
+                              "--expiry YYYY-MM-DD to be exact[/]")
+            legs = attach_ivs(legs, chain, out.spot, dte)
+
+            entry_wd = result.candles[-1].timestamp.weekday()
+            vix_hist = macro.get("indiavix") if macro and "indiavix" in macro else None
+            iv_chg, _iv_sd, iv_note = measure_overnight_iv_change(vix_hist, entry_wd)
+
+            # The gap distribution is what prices an exit at the open; the
+            # session distribution is only needed to price holding past it.
+            from model.forecast.distribution import build_distribution
+            gap_loc = out.gap.expected_pct if out.gap and out.gap.available else 0.0
+            gap_scale = (out.gap.sigma_pct if out.gap and out.gap.available
+                         else out.vol.sigma_gap_pct)
+            gap_dist = build_distribution(
+                gap_scale, "gap", out.decision.market.distribution.shape,
+                location_pct=gap_loc,
+                location_source="gap model (AUC 0.748 out of sample)")
+
+            console.print()
+            render_exit(evaluate_exit(
+                legs, out.spot, gap_dist, out.decision.market.distribution, dte,
+                lots=args.lots, lot_size=SETTINGS.lot_size,
+                iv_change_pts=iv_chg, iv_change_note=iv_note), console)
+        return 0
+    except Exception as exc:
+        if not journaled:
+            try:
+                rec = paper_journal.record_run(
+                    history=result, chain=chain, result=out,
+                    requested_source=args.source,
+                    status="ERROR", note=f"{type(exc).__name__}: {exc}",
+                    at=run_at, paper_entry=False)
+                console.print(f"[dim]paper run journaled #{rec.id} (ERROR)[/]")
+            except Exception as journal_exc:
+                console.print(f"[red]premarket journal failed: {journal_exc}[/]")
+        console.print(f"[red]premarket failed: {type(exc).__name__}: {exc}[/]")
+        return 1
+
+
+def cmd_premarket_journal(args) -> int:
+    from journal.premarket_db import shared_premarket_journal
+
+    rows = shared_premarket_journal().list(limit=args.limit)
+    if not rows:
+        console.print("no premarket paper runs recorded")
+        return 0
+    table = Table(title="Premarket Paper Journal")
+    for name in ("id", "created", "data", "feed", "model verdict", "paper status",
+                 "candidate", "lots", "max loss", "budget", "edge"):
+        table.add_column(name, justify="right" if name in (
+            "id", "lots", "max loss", "budget", "edge")
+                         else "left")
+    for row in rows:
+        table.add_row(
+            str(row.id), row.created_at[:16].replace("T", " "),
+            row.data_date or "—", row.history_source or "—", row.model_action,
+            row.paper_status, row.candidate_name or "—", str(row.lots),
+            f"₹{row.max_loss_total:,.0f}" if row.max_loss_total is not None else "—",
+            f"₹{row.risk_budget_rupees:,.0f}",
+            (f"₹{row.edge_after_hurdle:+,.0f}"
+             if row.edge_after_hurdle is not None else "—"))
+    console.print(table)
     return 0
 
 
@@ -1398,7 +1483,7 @@ def main() -> int:
     pm.add_argument("--laya-enforce", action="store_true",
                     help="apply a Laya veto (GO/TRADE -> NO-GO); implies --laya")
     pm.add_argument("--journal", action="store_true",
-                    help="record the Laya verdict (premarket keeps no other journal)")
+                    help="also record the optional Laya verdict (paper run always journals)")
     pm.add_argument("--exit", action="append", default=[], metavar="LEG",
                     help="price a position you already hold, e.g. "
                          "--exit 23100CE@223.55 (repeat for a spread; "
@@ -1407,6 +1492,10 @@ def main() -> int:
                     help="lots held (with --exit)")
     pm.add_argument("--expiry", default=None,
                     help="YYYY-MM-DD of the position's expiry (with --exit)")
+
+    pmj = sub.add_parser("premarket-journal",
+                         help="review the automatically journaled premarket paper runs")
+    pmj.add_argument("--limit", type=int, default=20)
 
     fe = sub.add_parser("forecast-eval",
                         help="score the forecast stack and the incumbent engine")
@@ -1455,6 +1544,7 @@ def main() -> int:
         "tonight": cmd_tonight,
         "stock-overnight": cmd_stock_overnight,
         "premarket": cmd_premarket,
+        "premarket-journal": cmd_premarket_journal,
         "forecast-eval": cmd_forecast_eval,
         "archive-chain": cmd_archive_chain,
         "kite-login": cmd_kite_login,

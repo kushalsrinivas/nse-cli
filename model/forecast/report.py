@@ -15,7 +15,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 
-def render_premarket(result, console: Console | None = None) -> None:
+def render_premarket(result, console: Console | None = None, *,
+                     show_paper: bool = True) -> None:
     c = console or Console()
     d = result.decision
     m = d.market
@@ -144,6 +145,34 @@ def render_premarket(result, console: Console | None = None) -> None:
             lines.append(f"· {i}")
     style = "green" if d.trade.has_edge else "yellow"
     c.print(Panel("\n".join(lines), title=f"[bold {style}]DECISION[/]", expand=False))
+
+    if show_paper:
+        paper = result.paper_candidate
+        if paper is None:
+            paper_lines = ["No priceable structure; no paper position opened."]
+        else:
+            paper_lines = [
+                f"[bold]{paper.structure.name}[/] · {paper.structure.kind} · "
+                f"{paper.structure.expiry}",
+                f"model verdict: {d.action}",
+                f"edge after hurdle ₹{paper.edge_after_hurdle:+,.0f}/lot "
+                f"(95% CI [₹{paper.edge_ci[0]:+,.0f}, ₹{paper.edge_ci[1]:+,.0f}])",
+            ]
+            if result.paper_risk and result.paper_risk.allowed:
+                paper_lines.append(
+                    f"paper size {result.paper_risk.contracts} lot(s) · max loss "
+                    f"₹{result.paper_risk.max_risk_rupees:,.0f} · configured budget "
+                    f"₹{result.paper_budget_rupees:,.0f}")
+            else:
+                reason = (result.paper_risk.reason if result.paper_risk
+                          else "paper sizing unavailable")
+                paper_lines.append(f"[yellow]not entered: {reason}[/]")
+            if result.paper_forced:
+                paper_lines.append(
+                    "[yellow]FORCED PAPER candidate — not a model GO or a live order[/]")
+        c.print(Panel("\n".join(paper_lines),
+                      title="PAPER JOURNAL — separate from model decision",
+                      expand=False))
 
     for kind, msg in result.notices:
         c.print(f"[yellow]{msg}[/]" if kind == "warn" else f"[dim]{msg}[/]")

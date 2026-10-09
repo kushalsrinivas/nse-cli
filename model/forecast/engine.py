@@ -16,6 +16,7 @@ manufacturing a view.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -30,13 +31,35 @@ from model.forecast.distribution import (
     build_distribution,
     implied_distribution,
 )
-from model.forecast.features import PREOPEN, build_dataset
+from model.forecast.features import PREOPEN, build_dataset, build_live_row
 from model.forecast.models import RidgeLogistic, RidgeRegression
 
 #: Global block used for the gap forecast. Pre-registered in the Stage 2
 #: evaluation, not selected from results.
 GAP_FEATURES = ["g_spx_ret", "g_nasdaq_ret", "g_inda_ret",
                 "g_usdinr_ret", "g_brent_ret", "g_vix_level"]
+
+
+def premarket_history_issue(candles, today: date | None = None) -> str | None:
+    """Reject history that misses the previous weekday's completed session.
+
+    ponytail: weekdays only; this can block on an NSE holiday, but avoids
+    paper-entering from an obviously stale close until an exchange calendar
+    is available.
+    """
+    if not candles:
+        return "no NIFTY daily bars"
+    today = today or datetime.now().date()
+    if today.weekday() >= 5:
+        return f"{today} is a weekend; no premarket session is scheduled"
+    expected = today - timedelta(days=1)
+    while expected.weekday() >= 5:
+        expected -= timedelta(days=1)
+    newest = candles[-1].timestamp.date()
+    if newest < expected:
+        return (f"latest NIFTY bar is {newest}; expected at least the previous "
+                f"weekday ({expected})")
+    return None
 
 
 @dataclass
@@ -67,6 +90,11 @@ class PremarketResult:
     spot: float
     scenarios: list[dict] = field(default_factory=list)
     notices: list[tuple[str, str]] = field(default_factory=list)
+    paper_candidate: object | None = None
+    paper_risk: L7.RiskView | None = None
+    paper_forced: bool = False
+    paper_budget_rupees: float = 20_000.0
+    paper_lot_size: int = 75
 
 
 def _fit_gap_model(ds, latest_row) -> GapForecast | None:
@@ -124,13 +152,15 @@ def _scenarios(dist, expected_open: float, spot: float) -> list[dict]:
 
 
 def build_premarket(candles, chain=None, macro=None, vix_level: float | None = None,
-                    settings=SETTINGS, holding_days: float = 1.0
+                    settings=SETTINGS, holding_days: float = 1.0,
+                    target_date: date | None = None
                     ) -> PremarketResult:
     """One pre-market decision. Pure function of its inputs; fetches nothing."""
     notices: list[tuple[str, str]] = []
     ds = build_dataset(candles, macro, decision_point=PREOPEN)
     frame = ds.frame
-    latest = frame.iloc[-1]
+    target_date = target_date or date.today()
+    latest = build_live_row(candles, macro, target_date=target_date)
     from model.backtest import _base_frame
     ohlc = _base_frame(candles)
     spot = float(ohlc["close"].iloc[-1])
@@ -228,8 +258,22 @@ def build_premarket(candles, chain=None, macro=None, vix_level: float | None = N
         trade.has_edge = False
     instrument = L7.InstrumentView(best=best if trade.has_edge else None,
                                    ranked=ranked, rejected=rejected)
-    risk = (L7.size_trade(best, settings) if trade.has_edge
+    risk = (L7.size_trade(
+                best, settings,
+                risk_budget_rupees=settings.premarket_risk_budget_rupees)
+            if trade.has_edge
             else L7.RiskView(False, reason="no trade to size"))
+
+    # The paper lane records the top structure on every evaluable premarket
+    # run, even when the real model verdict is NO TRADE. It never changes the
+    # decision above and remains subject to the fixed rupee risk budget.
+    paper_candidate = ranked[0] if ranked else None
+    paper_risk = (L7.size_trade(
+        paper_candidate, settings,
+        risk_budget_rupees=settings.premarket_risk_budget_rupees)
+        if paper_candidate is not None else None)
+    paper_forced = bool(paper_candidate is not None and (
+        not trade.has_edge or not risk.allowed))
 
     near = [a for a in assessed if abs(a.distance_sigma) <= 2.0][:6]
     execution = L7.ExecutionView(
@@ -250,7 +294,10 @@ def build_premarket(candles, chain=None, macro=None, vix_level: float | None = N
         decision=dec, gap=gap, vol=vol, premium=premium, vol_edge=vol_edge,
         expected_open=round(expected_open, 2), spot=round(spot, 2),
         scenarios=_scenarios(session_dist, expected_open, spot),
-        notices=notices)
+        notices=notices, paper_candidate=paper_candidate,
+        paper_risk=paper_risk, paper_forced=paper_forced,
+        paper_budget_rupees=settings.premarket_risk_budget_rupees,
+        paper_lot_size=settings.lot_size)
 
 
 def _regime_label(row) -> str:

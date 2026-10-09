@@ -55,6 +55,7 @@ class HistoryResult:
     interval: str
     fetched_at: datetime
     from_cache: bool
+    source: str = "yahoo"
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
@@ -208,6 +209,7 @@ def fetch_history(
         interval=interval,
         fetched_at=datetime.now(),
         from_cache=False,
+        source="yahoo",
     )
     cache.set(result, "nifty_history", params)
     return result

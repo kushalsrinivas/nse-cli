@@ -156,6 +156,7 @@ class TestHistoryRouting(unittest.TestCase):
                        return_value=(candles, None)):
                 out = datasrc.get_nifty_history(period="5d", source="auto")
                 self.assertEqual(len(out.candles), 5)
+                self.assertEqual(out.source, "kite")
                 self.assertEqual(out.quote.price, 24040.0)
                 self.assertEqual(out.quote.previous_close, 24030.0)
                 self.assertFalse(out.from_cache)

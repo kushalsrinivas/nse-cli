@@ -110,6 +110,9 @@ class Settings:
     # Backstop for any future stop-distance error: risk-based sizing alone
     # cannot bound outlay when the stop is tight.
     max_premium_deploy_pct: float = 0.25
+    # PREOPEN paper sizing only. Absolute modeled-loss budget, capped at
+    # account equity by the sizer; this is 4% of the current ₹500,000 setting.
+    premarket_risk_budget_rupees: float = 20_000.0
 
     # --- Overnight strategy ---
     min_bucket_n: int = 10                # minimum historical sample for a GO
