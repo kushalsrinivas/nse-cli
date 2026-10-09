@@ -34,6 +34,8 @@ with a session — see below).
 | `tonight --laya` · `premarket --laya` · `laya` · `laya-eval` | Laya veto filter on the overnight/premarket cards and Setups A/B/C (shadow default; `--laya-enforce` applies) |
 | `model_cli.py archive-chain [--expiries N]` | Persist tonight's option chain — **cron this at ~15:25 IST** |
 | `model_cli.py kite-login / kite-master / kite-parity / kite-live` | Kite session · instrument master · source parity · WS streaming |
+| `model_cli.py ob-audit / ob-backfill / ob-record` | Order-block data: availability report · REST minute archive · WS leg recorder |
+| `model_cli.py ob / ob-paper / ob-backtest / ob-journal / ob-settle / ob-kill` | Order-block system (paper only): scan · live paper session · backtest + verdict · review · manual close · kill switch — see `docs/ORDER_BLOCKS.md` §10 |
 | `main.py -oj` , `--settle-overnight ID PX` , `--settle-confluence ID PX` , `--settle-stock ID PX` | Journals + manual settlement |
 
 All decision commands — `tonight`, `overnight`, `confluence` — are
@@ -88,7 +90,7 @@ fetchers is the degrade-don't-crash design.
 - `docs/STOCK_OVERNIGHT.md` — per-stock engine, lots, journal, caveats
 - `docs/KITE.md` — Kite service: commands, data audit, production rules
 - `docs/LAYA.md` — Laya veto filter: questions, policy, shadow mode, evaluation
-- `docs/ORDER_BLOCKS.md` — order-block system design (NIFTY options, paper-only): schemas, detection, scoring, backtest, risk, Kite wiring
+- `docs/ORDER_BLOCKS.md` — order-block system (NIFTY options, paper-only): schemas, detection, scoring, backtest, risk, Kite wiring, runbook (§10)
 
 ## Known limitations (honest)
 

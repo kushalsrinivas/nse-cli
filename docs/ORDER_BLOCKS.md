@@ -1,7 +1,9 @@
 # Order-block system for NIFTY options — design spec
 
-Status: **design only, nothing in this document is implemented yet.**
-Execution: **paper only.** No module described here calls `place_order`.
+Status: **implemented (phases 0–6), paper only, unvalidated.** See §10 for
+what was built, where it deviates from the first draft, and the daily
+runbook. Nothing here has been run against a live Kite session yet.
+Execution: **paper only.** No module described here sends an order to Kite.
 Horizons: intraday (MIS-equivalent, flat by 15:15) and overnight
 (NRML-equivalent, decided ~15:20, exited at or after the next open).
 
@@ -467,8 +469,10 @@ The existing `latest_swing_pivot` in `model/confluence/indicators.py` uses
 ### 3.3 Structure: BOS vs CHoCH
 
 Track `last_high` / `last_low`: the most recent confirmed swing of each
-kind not yet broken. Trend state is `up` once a confirmed higher-high and
-higher-low pair exists, `down` for the mirror, `none` otherwise.
+kind not yet broken. Trend state is the direction of the last break
+(`up` after a close above a confirmed high, `down` after a close below a
+confirmed low, `none` before the first break). So it is defined purely by
+closes through confirmed swings, never by an unconfirmed pivot.
 
 On each completed bar `t`:
 
@@ -489,8 +493,10 @@ Given a bullish break at bar `b` of swing high `S`:
    `max(|C−O|) ≥ disp_body_atr × ATR_b` or
    `(H_b − L_o) ≥ disp_range_atr × ATR_b`. Record both ratios.
 3. **Source candle** `s`: the **last bearish candle** (`C < O`) in
-   `[o − 3, b − 1]`, searched backward from `b − 1`. If none is bearish,
-   use bar `o` itself. Doji (`|C−O| < 0.1 × ATR`) count as opposing.
+   `[o − 3, o]`, searched backward from `o`. That is the last opposing
+   candle at or before the start of the move. If none is bearish, use bar
+   `o` itself. Doji (`|C−O| < 0.1 × ATR`) count as opposing. (The first
+   draft searched back from `b − 1`, which picks mid-leg pullback candles.)
 4. **Zone** `= [L_s, H_s]`. If `H_s − L_s > max_zone_atr × ATR_b`, drop
    the upper wick: `[L_s, max(O_s, C_s)]`. If that is still too wide,
    reject. `zone_mid = (low + high) / 2`.
@@ -541,7 +547,8 @@ Evaluated on every completed detection-TF bar `t > b`, in this order:
 - Window: triggers between **09:30 and 14:45** only. 09:15–09:30 is
   dominated by the gap auction, and after 14:45 there isn't enough time to
   reach a target before 15:15.
-- Entry = next 5m bar's open (backtest), or market at decision (live/paper).
+- Entry = open of the first 1m bar after the trigger bar closes
+  (backtest), or market at decision (live/paper).
 
 **Overnight** (detection 15m/60m, decision at the 15:15 bar close):
 
@@ -645,11 +652,19 @@ ranking and the card says so.
    | `bull_put_spread` | −1 PE below `u_stop`, +1 PE one-two strikes lower | the only structure on the side of the measured vol premium; risk defined |
 
 4. Price each one with `options_edge.evaluate_structure` over a
-   **horizon-matched** distribution: intraday = remaining-session
-   distribution, overnight = gap distribution. Neither is the audit's
-   location-free one; the OB signal supplies the location and the harness
-   decides whether that location is real. Pick the max-EV structure that
-   passes §5.2. If none has EV > 0, the gate fails.
+   **horizon-matched** distribution. Intraday uses the VIX session sigma
+   scaled to the minutes left until 15:15. Overnight uses the gap sigma
+   plus the session sigma to the 10:30 exit. The scale is the implied sigma
+   ÷ 1.19 (the measured implied/realised ratio), so the vol premium is
+   priced in exactly once. The **location** is zero unless a calibrated
+   P(win) exists (§4.4), in which case it is `p·(target−entry) +
+   (1−p)·(stop−entry)`. The gate metric is `ev_model`, in ₹/lot net of
+   spread and fees. Pick the max-EV structure that passes §5.2. If none
+   has EV > 0, the gate fails. Two implementation details matter here:
+   the structure carries **fractional** DTE, because rounding it up gave
+   the exit more time value than the entry. The hold is charged in
+   **variance-equivalent** days, so an intraday hold can't collect a
+   session's gamma for a few hours of calendar decay.
 5. Map stops: `o_stop` = structure value repriced at `u_stop` (same IV,
    DTE reduced by expected hold). The option's own stop is the looser of
    that value and a 40% premium loss on debit structures. **The
@@ -950,3 +965,86 @@ Live order submission is out of scope. Promotion to real money is a
 separate decision that needs: §6.5 passing on archived option data, ≥ 3
 months of paper results within the backtest's CI, and a written
 operational review.
+
+---
+
+## 10. Implementation status, deviations, runbook
+
+### 10.1 What exists
+
+| Spec | Module | Notes |
+|---|---|---|
+| §2.2 master history | `data/kite/store.py` → `kite_instrument_history` | change-only versions, NIFTY + `NIFTY 50`/`INDIA VIX`; `as_of_on()`, `lot_size_on()` |
+| §2.2 archive | `data/kite/archive.py` | `ob_series_1m`, `option_candles_1m`, `option_quotes` |
+| §2.1/2.3 backfill | `data/kite/backfill.py`, `services/ob_record.run_backfill` | 60-day chunks, T-2 roll, expired-contract days counted |
+| §8.1 recorder | `data/kite/legs.py`, `services/ob_record.py` | ATM±10 × 2 expiries + FUT1 + spot in `full` mode; re-centres; pins held legs |
+| §2.6 audit | `services/ob_audit.py` | Markdown via `ob-audit --out` |
+| §3 detection | `model/order_blocks/{bars,indicators,swings,structure,detect,lifecycle,triggers}.py` | |
+| §4 scoring/gates | `model/order_blocks/score.py` | gates are `ConditionCheck`s, same as confluence |
+| §5 contract | `model/order_blocks/contract.py` | long / debit spread / credit spread |
+| §5.3 exits | `model/order_blocks/exits.py` | one function for live and backtest |
+| engine | `model/order_blocks/engine.py` | 1m in, events out; 60m → 15m → 5m order per instant |
+| §2.2 journal | `journal/ob_db.py` | deterministic ids, immutable signals, append-only events |
+| §7 risk | `execution/governor.py` | structure-aware stress sizing, §7.3 limits |
+| §6.4 costs | `execution/costs.py` | pinned with `costs_as_of`; **verify the rates** |
+| §8.2 broker | `execution/paper_broker.py` | kiteconnect-shaped; no `kiteconnect` import (test-enforced) |
+| kill switch | `execution/kill_switch.py` | `~/.config/nifty-strats/KILL` or `OB_KILL=1` |
+| §6 backtest | `model/order_blocks/backtest.py`, `services/order_blocks.run_backtest` | B0–B3, verdict, grid, calibration, option layers |
+| live paper | `services/order_blocks.{PaperSession,run_paper}` | restart = replay stored bars; missed setups logged, never traded late |
+| CLI | `ob_commands.py` (registered into `model_cli.py`) | see §10.3 |
+| tests | `tests/test_ob_{data,detect,paper,backtest}.py` | 93 tests, network-free |
+
+### 10.2 Deviations from the first draft (and why)
+
+- **Source candle** (§3.4): last opposing candle at/before the leg origin,
+  not searched back from the break bar.
+- **Trend** (§3.3): direction of the last break, not a separate HH/HL
+  tracker. Same information, one definition.
+- **FVG** may sit on the break bar itself (`j = b`). It needs bar `b+1`, so
+  it is attached one bar after the zone is created. The largest gap wins.
+- **60m bars**: the 15:15 bin (15 minutes) is never emitted.
+- **Option EV gate** (§5.1): `ev_model` with a VRP-adjusted sigma, plus
+  fractional DTE and a variance-equivalent hold. The first implementation
+  used `edge_after_hurdle` with integer DTE and calendar hold, and showed
+  positive EV on long calls with no edge. Regression tests guard all three.
+- **Sizing** (§7.2): `RiskManager.size()` prices a single option against an
+  option-price R:R. The governor sizes whole structures against stress
+  loss and keeps `RiskManager`'s deploy ceiling and near-expiry throttle.
+- **Overnight positions are not stop-managed between entry (15:20) and
+  the close.** Exits start at the next session's open.
+- **Backtest costs** in the underlying layer are `cost_points` index points
+  per round trip (default 2.0), divided by risk points. The option layers
+  use the real `CostModel`.
+- **Synthetic option layer** sizes at today's master lot. Per-date lots
+  exist only from the day `kite_instrument_history` started.
+- **Freeze quantity** is a constant (`DEFAULT_FREEZE_QTY`) to verify
+  against the current NSE circular.
+
+### 10.3 Daily runbook (IST, trading days)
+
+| Time | Command | Why |
+|---|---|---|
+| once | `model_cli.py ob-audit --out docs/ORDER_BLOCKS_DATA_AUDIT.md` | Phase-0 report; commit it |
+| once | `model_cli.py ob-backfill --days 1825 --options` | years of spot, ~1 cycle of FUT1, live option legs |
+| 08:00 | `model_cli.py kite-login` then `kite-master` | session + versioned master |
+| 09:10 | `model_cli.py ob-paper --event "…"` | records legs + runs the paper session until 15:30 |
+| (or) 09:10 | `model_cli.py ob-record` | record only, if not paper trading today |
+| 15:25 | `model_cli.py archive-chain --expiries 2` | existing EOD chain archive |
+| 16:00 | `model_cli.py ob-backfill --days 3` | fills any WS gaps from REST |
+| weekly | `model_cli.py ob-backtest --from … --to … [--grid]` | refreshes the verdict + calibration that `ob`/`ob-paper` read |
+| any | `model_cli.py ob` · `ob-journal` · `ob-settle ID PX` · `ob-kill [--off]` | scan · review · manual close · stop everything |
+
+`ob-paper` already records everything `ob-record` does. Run one of them,
+not both: each opens its own WS connection (Kite allows 3 per API key, so
+`kite-live` alongside is fine), and two recorders would write duplicate
+quote rows for the same legs.
+
+### 10.4 What has NOT been verified
+
+- Nothing has run against a real Kite session: REST payload shapes,
+  `full`-mode depth on options, and quote timestamps are taken from the
+  existing parser and kiteconnect's documented shapes.
+- Cost rates, the freeze quantity and the NIFTY lot size must be checked
+  against current Zerodha/NSE sources (`ob-audit` prints the live lot).
+- The backtest has only run on synthetic random walks in tests. Its
+  numbers mean nothing until it runs on `ob-backfill` data.
