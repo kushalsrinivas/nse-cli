@@ -1529,6 +1529,9 @@ def main() -> int:
     kl2.add_argument("--tape-every", type=int, default=300,
                      help="live tape interval in seconds (default 300)")
 
+    from ob_commands import register as register_ob
+    ob_cmds = register_ob(sub)
+
     args = p.parse_args()
     cmd_map = {
         "evaluate": cmd_evaluate,
@@ -1556,6 +1559,7 @@ def main() -> int:
         "confluence": cmd_confluence,
         "laya": cmd_laya,
         "laya-eval": cmd_laya_eval,
+        **ob_cmds,
     }
     return cmd_map[args.cmd](args)
 
