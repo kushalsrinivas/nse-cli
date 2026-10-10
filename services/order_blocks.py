@@ -217,7 +217,8 @@ def evaluate(setup: Setup, ctx: Context, *, chains: dict[str, list[LegQuote]],
         blocked_reasons="; ".join(reasons),
         laya_json=json.dumps(laya_out) if laya_out else "",
         data_age_sec=ctx.spot_age_sec, vix=ctx.vix,
-        available_at=setup.available_at.isoformat(timespec="seconds") if setup.available_at else None)
+        available_at=setup.available_at.isoformat(timespec="seconds") if setup.available_at else None,
+        stress_json=json.dumps(sizing.stress) if sizing and sizing.stress else "")
     return Evaluation(setup, rec, sel, sizing, decision, reasons, checks, laya_out)
 
 

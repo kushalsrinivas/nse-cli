@@ -55,6 +55,16 @@ def setup_card(ev) -> Panel:
         plan.add_row("Risk", (f"{z.lots} lots · risk ₹{z.risk_rupees:,.0f} · stress "
                               f"₹{z.stress_loss_per_lot:,.0f}/lot · {z.bound_by}")
                      if z.allowed else f"blocked: {z.reason}")
+    if ev.sizing is not None and ev.sizing.stress:
+        st = ev.sizing.stress
+        plan.add_row("Next open", f"E[P&L] ₹{st['expected_pnl_lot']:+,.0f}/lot · E[loss] "
+                     f"₹{st['expected_loss_lot']:,.0f} · stress ₹{st['stress_loss_lot']:,.0f} "
+                     f"({st['stress_scenario']}) · break-even "
+                     f"{st['breakeven_move_points']:+.0f} pts" if st['breakeven_move_points'] is not None
+                     else f"stress ₹{st['stress_loss_lot']:,.0f}/lot ({st['stress_scenario']})")
+        for row in st["scenarios"]:
+            plan.add_row("", f"{row['name']:<28} {row['move_points']:+7.0f} pts  IV "
+                         f"{row['iv_shift']:+.1f}  ₹{row['pnl_lot']:+,.0f}/lot")
     if sig.p_win_calibrated is not None:
         plan.add_row("P(win)", f"{sig.p_win_calibrated:.2f} (calibrated)")
     else:

@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS ob_signals (
     data_age_sec REAL,
     vix REAL,
     available_at TEXT,
+    stress_json TEXT DEFAULT '',
     engine_version TEXT NOT NULL,
     params_hash TEXT NOT NULL,
     mode TEXT NOT NULL CHECK(mode IN ('live','backtest')),
@@ -228,6 +229,7 @@ class SignalRecord:
     data_age_sec: float | None = None
     vix: float | None = None
     available_at: str | None = None
+    stress_json: str = ""
     created_at: str = ""
 
     @property
@@ -338,6 +340,9 @@ class ObJournal:
         have = {r[1] for r in self.conn.execute("PRAGMA table_info(ob_signals)")}
         if "available_at" not in have:
             self.conn.execute("ALTER TABLE ob_signals ADD COLUMN available_at TEXT")
+            self.conn.commit()
+        if "stress_json" not in have:
+            self.conn.execute("ALTER TABLE ob_signals ADD COLUMN stress_json TEXT DEFAULT ''")
             self.conn.commit()
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(ob_paper_orders)")]
         if "attempt" not in cols:

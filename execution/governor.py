@@ -81,6 +81,7 @@ class GovernorDecision:
     risk_rupees: float = 0.0
     premium_deployed: float = 0.0
     bound_by: str = ""
+    stress: dict | None = None        # overnight stress-engine report (model/order_blocks/stress.py)
 
 
 def _leg_value(legs, sides, spot: float, dte: float, iv_shift_pts: float) -> float:
@@ -112,7 +113,23 @@ def stress_loss_per_unit(choice, setup, spot: float, now: datetime, *, vix: floa
         val = _leg_value(legs, sides, s_stress, dte - hold_days, iv_shift)
         half_spreads = sum(((q.ask or 0) - (q.bid or 0)) / 2 for q in legs)
         loss = entry - val + half_spreads
+        # The scenario engine (gap × IV grid, widened opening spread, weekend
+        # decay) can only make this more conservative, never less.
+        rep = overnight_stress(choice, setup, spot, now, vix=vix)
+        if rep is not None:
+            loss = max(loss, rep.stress_loss_unit)
     return round(min(max(loss, 0.0), choice.max_loss_per_unit), 2)
+
+
+def overnight_stress(choice, setup, spot: float, now: datetime, *, vix: float):
+    """Stress report for an overnight structure, or None if it can't be priced."""
+    from model.order_blocks.stress import stress_overnight
+    try:
+        return stress_overnight(choice.legs, choice.sides, entry_net=choice.o_entry, spot=spot,
+                                direction=setup.plan.direction, vix=vix, now=now,
+                                expiry=choice.structure.expiry, lot=choice.lot_size)
+    except Exception:
+        return None
 
 
 class RiskGovernor:
@@ -165,6 +182,10 @@ class RiskGovernor:
         lot = choice.lot_size
         l_unit = stress_loss_per_unit(choice, setup, spot, now, vix=vix, limits=lim,
                                       hold_days=hold_days)
+        stress = None
+        if setup.horizon == "overnight":
+            rep = overnight_stress(choice, setup, spot, now, vix=vix)
+            stress = rep.to_dict() if rep is not None else None
         if l_unit <= 0:
             l_unit = max(abs(choice.o_entry) * 0.05, 0.05)   # never size on a zero loss
         per_lot = l_unit * lot
@@ -185,6 +206,7 @@ class RiskGovernor:
             lots >= 1, "", tier, round(budget, 2), l_unit, round(per_lot, 2),
             max(lots, 0), lot, round(max(lots, 0) * per_lot, 2),
             round(max(lots, 0) * premium_lot, 2), bound)
+        dec.stress = stress
         if lots < 1:
             if bound == "deploy_ceiling":
                 dec.reason = (f"one lot needs ₹{premium_lot:,.0f}, above the ₹{deploy_cap:,.0f} "
