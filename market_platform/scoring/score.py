@@ -21,10 +21,18 @@ Order (the first failing filter is the primary reason; all are recorded):
    NOT_EXECUTABLE:<why> and stays visible.
 4. Cluster: candidates with the same direction, in the same
    `cluster_window_min` window and the same correlation cluster (else
-   sector, else instrument) share a `cluster_id`. Streaming rule: the first
-   `max_signals_per_cluster` QUALIFIED signals in a cluster keep their
-   status; later ones become SUPPRESSED:CLUSTER_CAP (visible, not traded).
-   Events are processed in (time, instrument) order, so this is deterministic.
+   sector, else instrument) share a `cluster_id`. Allocation policy, which
+   does not depend on processing order or worker timing:
+     * time priority across minutes — a slot taken by a signal that became
+       available at an earlier bar close stays taken (it may already be traded);
+     * merit priority within a minute — all candidates that became available
+       at the same bar close are ranked together by MERIT_KEY (score, then R:R,
+       then liquidity; the instrument key only breaks exact ties) and slots are
+       filled in that order.
+   Up to `max_signals_per_cluster` QUALIFIED signals per cluster keep their
+   status; the rest become SUPPRESSED:CLUSTER_CAP and stay visible. Every
+   candidate records its rank, the cluster size seen and the winners
+   (`allocation`).
 """
 
 from __future__ import annotations
@@ -131,8 +139,15 @@ class Scorer:
         cand.qualify_reasons = quals
 
 
+def merit_key(c, instrument: dict | None = None) -> tuple:
+    """Within-minute priority: higher score, then higher R:R, then more liquid;
+    the instrument key only orders exact ties (documented, not hidden)."""
+    adv = (instrument or {}).get("adv_value_cr") or (c.liquidity or {}).get("adv_value_cr") or 0.0
+    return (-(c.score or 0.0), -(c.rr or 0.0), -adv, c.instrument_key)
+
+
 class Clusterer:
-    """Streaming cluster assignment and per-cluster cap."""
+    """Cluster assignment and per-cluster cap (see module docstring)."""
 
     def __init__(self, window_min: int = 15, max_per_cluster: int = 1,
                  corr_cluster: dict[str, str] | None = None) -> None:
@@ -146,6 +161,24 @@ class Clusterer:
             return f"corr:{self.corr[key]}"
         sector = (instrument or {}).get("sector") or (instrument or {}).get("industry")
         return f"sector:{sector}" if sector else f"inst:{key}"
+
+    def allocate(self, cands: list, instruments: dict[str, dict]) -> list:
+        """Allocate one minute's candidates (one direction) in merit order."""
+        ranked = sorted(cands, key=lambda c: merit_key(c, instruments.get(c.instrument_key)))
+        for c in ranked:
+            self.assign(c, instruments.get(c.instrument_key))
+        by_cluster: dict[str, list] = {}
+        for c in ranked:
+            by_cluster.setdefault(c.cluster_id, []).append(c)
+        for cid, members in by_cluster.items():
+            winners = [m.instrument_key for m in members if m.status == "QUALIFIED"]
+            for rank, m in enumerate(members, 1):
+                m.allocation = {"policy": "time-then-merit", "cluster_id": cid,
+                                "rank_this_minute": rank, "candidates_this_minute": len(members),
+                                "kept_this_minute": winners,
+                                "taken_before": [k for k in self.qualified.get(cid, [])
+                                                 if k not in winners]}
+        return ranked
 
     def assign(self, cand, instrument: dict | None) -> None:
         t: datetime = cand.detected_at

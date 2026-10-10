@@ -19,6 +19,7 @@ from datetime import datetime
 from market_platform.execution.paper import PaperExecutor
 from market_platform.options import routes as R
 from market_platform.risk.governor import CentralGovernor, existing, persist
+from market_platform.signals.pipeline import MinuteSignals, desk_order
 
 log = logging.getLogger(__name__)
 
@@ -101,13 +102,27 @@ class TradingDesk:
         bars = bus.subscribe("candles.1m", "desk.marks", maxsize=self.cfg.workers.candle_queue,
                              policy="block")
 
-        async def decide_task():
-            while True:
-                cand = await q.get()
+        pending: dict = {}                      # minute ts → {direction: candidates}
+
+        async def decide(cands):
+            for cand in sorted(cands, key=desk_order):
                 try:
                     await self.process_async(cand)
                 except Exception:
                     log.exception("desk failed on %s", getattr(cand, "signal_id", "?"))
+
+        async def decide_task():
+            while True:
+                msg = await q.get()
+                if isinstance(msg, MinuteSignals):
+                    # barrier: decide a minute only when BOTH pipelines reported it
+                    got = pending.setdefault(msg.ts, {})
+                    got[msg.direction] = msg.candidates
+                    if set(got) >= {"bullish", "bearish"}:
+                        del pending[msg.ts]
+                        await decide([c for v in got.values() for c in v])
+                else:                                  # a lone candidate (tools, tests)
+                    await decide([msg])
 
         async def marks_task():
             while True:

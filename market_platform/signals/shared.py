@@ -84,6 +84,8 @@ class SignalCandidate:
     executable: bool | None = None
     routes: list[str] = field(default_factory=list)
     cluster_id: str | None = None
+    #: deterministic cluster allocation record (scoring/score.py, Clusterer)
+    allocation: dict = field(default_factory=dict)
     status: str = "WATCH"
     qualify_reasons: list[str] = field(default_factory=list)
     reject_reasons: list[str] = field(default_factory=list)

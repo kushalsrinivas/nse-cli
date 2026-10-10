@@ -212,7 +212,8 @@ class TestNiftyBaselineEquivalence(unittest.TestCase):
                                 s.plan.u_entry, s.plan.u_stop, s.plan.u_target, s.score.total))
         got = [(c.zone_id, c.pipeline, c.detected_at, c.horizon, c.entry, c.stop, c.targets[0],
                 c.core_score) for c in run_layer(layer())]
-        self.assertEqual(got, ref)
+        # same setups; within one minute the platform orders by merit, not emission order
+        self.assertEqual(sorted(got, key=str), sorted(ref, key=str))
         self.assertTrue({d for _, d, *_ in ref} == {"bullish", "bearish"})
 
 
@@ -405,6 +406,132 @@ class TestCorrelation(unittest.TestCase):
         self.assertAlmostEqual(beta(_returns(twin), _returns(base)), 1.0, delta=0.1)
 
 
+class TestDeterministicAllocation(unittest.TestCase):
+    """Cluster suppression and desk order must not depend on processing order
+    or task timing (scoring/score.py: time priority across minutes, merit
+    priority within a minute)."""
+
+    def _cands(self, n=6):
+        import copy
+
+        from market_platform.signals.shared import from_setup
+        from market_platform.structure.engine import StructureEngine
+        se = StructureEngine(params())
+        for b, _c in BARS:
+            for ev in se.on_bar(NIFTY, b):
+                if ev.kind == "setup" and ev.direction == "bullish":
+                    base = from_setup(ev, pipeline="bullish", instrument=None, strategy_version="t")
+                    out = []
+                    for i in range(n):
+                        c = copy.deepcopy(base)
+                        c.instrument_key, c.status = f"NSE:B{i}", "QUALIFIED"
+                        c.score, c.rr = 80.0 + (i % 3), 2.0 + i / 10
+                        out.append(c)
+                    return out
+        self.fail("no setup")
+
+    def test_merit_not_order_decides_who_is_kept(self):
+        import copy
+        import random
+
+        from market_platform.scoring.score import Clusterer
+        inst = {f"NSE:B{i}": eq_inst(f"NSE:B{i}") for i in range(6)}     # one sector: one cluster
+        results = set()
+        for seed in range(8):
+            cands = copy.deepcopy(self._cands())
+            random.Random(seed).shuffle(cands)
+            Clusterer(15, 1).allocate(cands, inst)
+            kept = tuple(sorted(c.instrument_key for c in cands if c.status == "QUALIFIED"))
+            results.add(kept)
+            for c in cands:
+                self.assertEqual(c.allocation["policy"], "time-then-merit")
+                self.assertEqual(c.allocation["candidates_this_minute"], 6)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results.pop(), ("NSE:B5",))     # score 82, highest R:R among 82s
+
+    def test_time_priority_across_minutes(self):
+        import copy
+        from datetime import timedelta
+
+        from market_platform.scoring.score import Clusterer
+        inst = {f"NSE:B{i}": eq_inst(f"NSE:B{i}") for i in range(6)}
+        early, late = copy.deepcopy(self._cands(2))
+        early.score, late.score = 76.0, 95.0
+        late.detected_at = early.detected_at + timedelta(minutes=1)
+        cl = Clusterer(15, 1)
+        cl.allocate([early], inst)
+        cl.allocate([late], inst)
+        self.assertEqual((early.status, late.status), ("QUALIFIED", "SUPPRESSED"))
+        self.assertEqual(late.allocation["taken_before"], [early.instrument_key])
+
+    def test_live_tasks_decide_like_replay_under_random_scheduling(self):
+        """Random delays in both pipelines and the desk → identical decisions."""
+        import random
+
+        from market_platform.marketdata.bus import Bus
+        from market_platform.marketdata.events import CandleClosed
+        from market_platform.persistence.db import open_db
+        from market_platform.portfolio.book import Portfolio
+        from market_platform.risk.desk import TradingDesk
+        from market_platform.signals.pipeline import SignalStore
+        cfg = cfg_()
+        instruments = {"NSE:A": eq_inst("NSE:A"), "NSE:B": eq_inst("NSE:B"),
+                       "NSE:C": eq_inst("NSE:C", sector="IT")}
+        bars = random_walk_bars(sessions=12, seed=11)
+
+        def decisions(app):
+            return [tuple(r) for r in app.execute(
+                "SELECT signal_id, approved, reason_codes FROM risk_decisions ORDER BY signal_id")]
+
+        ref_app = open_db(Path(tempfile.mkdtemp()) / "a.db", "app")
+        lay = layer(instruments=instruments, store=SignalStore(ref_app), run_id="r")
+        desk = TradingDesk(cfg, ref_app, Portfolio(500_000, run_id="r"), instruments=instruments,
+                           run_id="r")
+        for b, _c in bars:
+            minute = {k: b for k in instruments}
+            for k in sorted(minute):
+                desk.on_bar(k, minute[k])
+            for c in lay.on_bars(minute):
+                desk.process(c, c.available_at)
+        ref = decisions(ref_app)
+        self.assertTrue(ref)
+
+        for seed in (1, 2):
+            app = open_db(Path(tempfile.mkdtemp()) / "b.db", "app")
+            lay2 = layer(instruments=instruments, store=SignalStore(app), run_id="r")
+            desk2 = TradingDesk(cfg, app, Portfolio(500_000, run_id="r"), instruments=instruments,
+                                run_id="r")
+            rng = random.Random(seed)
+
+            async def jitter_publish(bus, rng=rng):
+                real = bus.publish
+
+                async def pub(topic, ev):
+                    if topic.startswith(("signals.", "structure.")):
+                        for _ in range(rng.randint(0, 3)):
+                            await asyncio.sleep(0)
+                    await real(topic, ev)
+                bus.publish = pub
+
+            async def go(lay2=lay2, desk2=desk2, rng=rng):
+                bus = Bus()
+                await jitter_publish(bus, rng)
+                t1 = asyncio.create_task(lay2.run(bus))
+                t2 = asyncio.create_task(desk2.run(bus))
+                await asyncio.sleep(0)
+                for b, _c in bars:
+                    for k in sorted(instruments):
+                        await bus.publish("candles.1m", CandleClosed(k, "1m", b, b.end, "replay"))
+                    for _ in range(rng.randint(5, 40)):
+                        await asyncio.sleep(0)
+                for _ in range(400):
+                    await asyncio.sleep(0)
+                t1.cancel()
+                t2.cancel()
+            asyncio.run(go())
+            self.assertEqual(decisions(app), ref, f"seed {seed}")
+
+
 class TestLiveTasks(unittest.TestCase):
     def test_bus_driven_pipelines(self):
         from market_platform.marketdata.bus import Bus
@@ -413,16 +540,23 @@ class TestLiveTasks(unittest.TestCase):
         async def go():
             bus = Bus()
             lay = layer()
-            bull = bus.subscribe("signals.bullish", "t1", maxsize=1000)
-            bear = bus.subscribe("signals.bearish", "t2", maxsize=1000)
+            bull = bus.subscribe("signals.bullish", "t1", maxsize=50000)
+            bear = bus.subscribe("signals.bearish", "t2", maxsize=50000)
             task = asyncio.create_task(lay.run(bus))
             await asyncio.sleep(0)
             for b, _c in BARS:
                 await bus.publish("candles.1m", CandleClosed(NIFTY, "1m", b, b.end, "replay"))
-            for _ in range(200):
+            # wait until every bar went through and every queue is empty
+            for _ in range(200000):
+                await asyncio.sleep(0)
+                if lay.structure.counters["bars"] == len(BARS) and \
+                        all(x["depth"] == 0 for x in bus.stats() if x["name"] not in ("t1", "t2")):
+                    break
+            for _ in range(50):
                 await asyncio.sleep(0)
             task.cancel()
-            return bull.drain(), bear.drain()
+            flat = lambda sub: [c for m in sub.drain(10**6) for c in m.candidates]  # noqa: E731
+            return flat(bull), flat(bear)
         bull, bear = asyncio.run(go())
         ref = run_layer(layer())
         self.assertEqual(sorted(c.signal_id for c in bull + bear), sorted(c.signal_id for c in ref))

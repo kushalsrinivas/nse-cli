@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 
 from market_platform.candles.volume import join_index_volume
@@ -43,6 +44,60 @@ SIGNAL_COLUMNS = (
     "reject_reasons", "config_hash", "universe_snapshot", "created_at")
 
 
+@dataclass(frozen=True)
+class MinuteSetups:
+    """Structure → pipeline: one direction's setups for one settled minute."""
+    ts: datetime
+    direction: str
+    events: list
+
+
+@dataclass(frozen=True)
+class MinuteSignals:
+    """Pipeline → desk: one direction's evaluated candidates for one minute
+    (possibly empty — it doubles as the barrier for that minute)."""
+    ts: datetime
+    direction: str
+    candidates: list
+
+
+def desk_order(c) -> tuple:
+    """Order in which the governor sees candidates: by availability, then
+    merit (score, R:R), then direction and instrument only to break exact ties."""
+    return (c.available_at, -(c.score or 0.0), -(c.rr or 0.0), c.direction, c.instrument_key)
+
+
+class SwingsAt:
+    """Frozen copy of a swing list with the tracker's `confirmed()` reader."""
+    __slots__ = ("swings",)
+
+    def __init__(self, swings) -> None:
+        self.swings = list(swings)
+
+    def confirmed(self, as_of, kind=None):
+        return [s for s in self.swings if s.confirmed_ts <= as_of and (kind is None or s.kind == kind)]
+
+
+def capture_inputs(ev: StructureEvent, structure: StructureEngine, context=None, spreads=None) -> dict:
+    """Everything a pipeline reads about the market, frozen at detection time."""
+    eng = structure.engines.get(ev.instrument_key)
+    st = eng.tf.get(ev.zone.timeframe) if eng else None
+    snap = {}
+    if context is not None and context.snapshot is not None:
+        snap = {"snapshot_id": context.snapshot.snapshot_id, "regime": context.snapshot.regime,
+                "regime_conf": context.snapshot.regime_conf,
+                "vol_regime": context.snapshot.vol_regime}
+    return {
+        "leg": leg_bars(ev.zone, st.bars) if st else [],
+        "swings": SwingsAt(st.swings.swings) if st else None,
+        "view": context.instrument_view(ev.instrument_key) if context else {},
+        "alignment": {d: (context.alignment(d, ev.instrument_key) if context else 0.0)
+                      for d in ("bullish", "bearish")},
+        "snapshot": snap,
+        "spread_bps": spreads(ev.instrument_key) if spreads else None,
+    }
+
+
 class SignalPipeline:
     """One direction. Pure evaluation; persistence is the caller's."""
 
@@ -57,26 +112,18 @@ class SignalPipeline:
         self.counters = {"setups": 0, "signals": 0, "errors": 0}
         self.by_status: dict[str, int] = {}
 
-    def evaluate(self, ev: StructureEvent, *, instrument: dict | None, structure: StructureEngine,
-                 context=None, quarantined: set[str] = frozenset(),
-                 spread_bps: float | None = None) -> SignalCandidate:
+    def evaluate(self, ev: StructureEvent, *, instrument: dict | None, inputs: dict,
+                 quarantined: set[str] = frozenset(), allocate: bool = True) -> SignalCandidate:
+        """`inputs` is captured when the setup is detected (`capture_inputs`), so
+        evaluation never reads engine or context state from a later minute."""
         self.counters["setups"] += 1
         cand = from_setup(ev, pipeline=self.direction, instrument=instrument,
                           strategy_version=self.strategy_version)
-        eng = structure.engines.get(ev.instrument_key)
-        st = eng.tf.get(ev.zone.timeframe) if eng else None
-        leg = leg_bars(ev.zone, st.bars) if st else []
-        swings = st.swings if st else None
-        view = context.instrument_view(ev.instrument_key) if context else {}
-        align = context.alignment(self.direction, ev.instrument_key) if context else 0.0
-        if context is not None and context.snapshot is not None:
-            cand.context = {"snapshot_id": context.snapshot.snapshot_id,
-                            "regime": context.snapshot.regime,
-                            "regime_conf": context.snapshot.regime_conf,
-                            "vol_regime": context.snapshot.vol_regime,
-                            "alignment": align, **view}
-        else:
-            cand.context = {"alignment": align, **view}
+        leg, swings = inputs["leg"], inputs["swings"]
+        view = inputs["view"]
+        align = inputs["alignment"][self.direction]
+        spread_bps = inputs.get("spread_bps")
+        cand.context = {**inputs["snapshot"], "alignment": align, **view}
         cand.confirmations = self.rules.confirmations(cand, zone=ev.zone, leg_bars=leg,
                                                       swings=swings, ctx_view=view, alignment=align)
         cand.executable, cand.routes, why = self.rules.executability(cand, instrument)
@@ -94,10 +141,17 @@ class SignalPipeline:
             cand.reject_reasons = [*cand.reject_reasons, f"NOT_EXECUTABLE:{why}"]
         elif cand.executable is False:
             cand.qualify_reasons = [*cand.qualify_reasons, f"view only — NOT_EXECUTABLE:{why}"]
-        self.clusterer.assign(cand, instrument)
         self.counters["signals"] += 1
-        self.by_status[cand.status] = self.by_status.get(cand.status, 0) + 1
+        if allocate:
+            self.clusterer.allocate([cand], {cand.instrument_key: instrument or {}})
+            self.by_status[cand.status] = self.by_status.get(cand.status, 0) + 1
         return cand
+
+    def allocate(self, cands: list[SignalCandidate], instruments: dict[str, dict]) -> list:
+        ranked = self.clusterer.allocate(cands, instruments)
+        for c in ranked:
+            self.by_status[c.status] = self.by_status.get(c.status, 0) + 1
+        return ranked
 
 
 class SignalStore:
@@ -121,7 +175,8 @@ class SignalStore:
             "score": cand.score,
             "score_json": json.dumps({"parts": cand.score_parts, "core": cand.core_components,
                                       "htf_trend": cand.htf_trend, "atr": cand.atr,
-                                      "routes": cand.routes, "executable": cand.executable}),
+                                      "routes": cand.routes, "executable": cand.executable,
+                                      "allocation": cand.allocation}),
             "p_calibrated": None,
             "confirmations_json": json.dumps([c.__dict__ for c in cand.confirmations], default=str),
             "context_json": json.dumps(cand.context, default=str),
@@ -190,25 +245,33 @@ class SignalLayer:
     # -- sync path (replay, tests, and inside the live tasks) -------------------------------
 
     def on_bars(self, bars: dict) -> list[SignalCandidate]:
-        """All instruments' bars of one minute. Index bars get their proxy
-        future's volume (candles/volume.py) before the core sees them."""
+        """All instruments' bars of one minute → that minute's candidates.
+
+        Index bars get their proxy future's volume first. Every instrument is
+        run through the structure engine before any candidate is judged, so
+        the cluster allocation sees the whole minute at once, and the result
+        is returned in DESK_ORDER — none of it depends on processing order."""
         bars = join_index_volume(bars, self.volume_proxy)
-        out: list[SignalCandidate] = []
+        setups: dict[str, list[StructureEvent]] = {d: [] for d in self.pipelines}
         for key in sorted(bars):
             if key in self.proxy_only:
                 continue
-            out.extend(self.on_bar(key, bars[key]))
-        return out
+            if self.context is not None:
+                self.context.on_bar(key, bars[key])
+            for ev in self.structure.on_bar(key, bars[key], self.volume_proxy.get(key)):
+                if self.store is not None:
+                    self.store.save_zone(ev, self.run_id)
+                if ev.kind == "setup":
+                    setups[ev.direction].append((ev, self._capture(ev)))
+        out: list[SignalCandidate] = []
+        for d, evs in setups.items():
+            out.extend(self.evaluate_minute(d, evs))
+        if self.store is not None:
+            self.store.commit()
+        return sorted(out, key=desk_order)
 
     def on_bar(self, key: str, bar) -> list[SignalCandidate]:
-        if self.context is not None:
-            self.context.on_bar(key, bar)
-        out = []
-        for ev in self.structure.on_bar(key, bar, self.volume_proxy.get(key)):
-            cand = self.handle(ev)
-            if cand is not None:
-                out.append(cand)
-        return out
+        return self.on_bars({key: bar})
 
     def handle(self, ev: StructureEvent) -> SignalCandidate | None:
         if self.store is not None:
@@ -217,30 +280,45 @@ class SignalLayer:
             return None
         return self.evaluate(ev)
 
+    def _capture(self, ev: StructureEvent) -> dict:
+        return capture_inputs(ev, self.structure, self.context, self.spreads)
+
     def evaluate(self, ev: StructureEvent) -> SignalCandidate | None:
-        pipe = self.pipelines[ev.direction]
-        try:
-            sp = self.spreads(ev.instrument_key) if self.spreads else None
-            cand = pipe.evaluate(ev, instrument=self.instruments.get(ev.instrument_key),
-                                 structure=self.structure, context=self.context,
-                                 quarantined=self.quarantined, spread_bps=sp)
-        except Exception as exc:                        # isolate the direction + instrument
-            pipe.counters["errors"] += 1
-            self.errors.append({"ts": ev.at.isoformat(), "pipeline": ev.direction,
-                                "instrument_key": ev.instrument_key, "error": repr(exc)})
-            log.exception("%s pipeline failed on %s", ev.direction, ev.instrument_key)
-            return None
+        out = self.evaluate_minute(ev.direction, [(ev, self._capture(ev))])
+        return out[0] if out else None
+
+    def evaluate_minute(self, direction: str, events: list[tuple]) -> list[SignalCandidate]:
+        """Evaluate one direction's setups of one minute, allocate clusters in
+        merit order, persist. An exception isolates that setup only."""
+        pipe = self.pipelines[direction]
+        cands = []
+        for ev, inputs in events:
+            try:
+                cands.append(pipe.evaluate(ev, instrument=self.instruments.get(ev.instrument_key),
+                                           inputs=inputs, quarantined=self.quarantined,
+                                           allocate=False))
+            except Exception as exc:                        # isolate the direction + instrument
+                pipe.counters["errors"] += 1
+                self.errors.append({"ts": ev.at.isoformat(), "pipeline": ev.direction,
+                                    "instrument_key": ev.instrument_key, "error": repr(exc)})
+                log.exception("%s pipeline failed on %s", ev.direction, ev.instrument_key)
+        ranked = pipe.allocate(cands, self.instruments)
         if self.store is not None:
-            self.store.save(cand, run_id=self.run_id, config_hash=self.cfg.hash,
-                            universe_snapshot=self.universe_snapshot)
+            for c in ranked:
+                self.store.save(c, run_id=self.run_id, config_hash=self.cfg.hash,
+                                universe_snapshot=self.universe_snapshot)
             self.store.commit()
-        return cand
+        return ranked
 
     # -- live path: separate tasks and queues per direction ---------------------------------
 
     async def run(self, bus, *, health=None) -> None:
-        """Consume `candles.1m`; route setups to per-direction queues; each
-        pipeline task publishes `signals.<direction>`."""
+        """Consume `candles.1m`. For every settled minute the structure task
+        publishes one `MinuteSetups` per direction (possibly empty) on
+        `structure.<direction>`; each pipeline task answers with one
+        `MinuteSignals` on `signals.<direction>`. The desk decides a minute only
+        when both directions have answered (a barrier), so the order in which
+        the tasks happen to run cannot change any decision."""
         q = {d: bus.subscribe(f"structure.{d}", f"pipeline.{d}",
                               maxsize=self.cfg.workers.signal_queue, policy="block")
              for d in self.pipelines}
@@ -251,14 +329,15 @@ class SignalLayer:
             while True:
                 # The candle service publishes a whole settled batch at once:
                 # drain it and process minute by minute, instruments sorted, so
-                # live and replay see identical input order (and index bars can
-                # be joined with their proxy future's volume).
+                # live and replay see identical input (and index bars can be
+                # joined with their proxy future's volume).
                 batch = [await candles.get(), *candles.drain()]
                 by_ts: dict = {}
                 for ev in batch:
                     by_ts.setdefault(ev.bar.ts, {})[ev.instrument_key] = ev.bar
                 for ts in sorted(by_ts):
                     bars = join_index_volume(by_ts[ts], self.volume_proxy)
+                    setups: dict[str, list] = {d: [] for d in self.pipelines}
                     for key in sorted(bars):
                         if key in self.proxy_only:
                             continue
@@ -268,22 +347,24 @@ class SignalLayer:
                             if self.store is not None:
                                 self.store.save_zone(sev, self.run_id)
                             if sev.kind == "setup":
-                                await bus.publish(f"structure.{sev.direction}", sev)
+                                setups[sev.direction].append((sev, self._capture(sev)))
                             else:
                                 await bus.publish("structure.zones", sev)
-                if self.store is not None:
-                    self.store.commit()
+                    if self.store is not None:
+                        self.store.commit()
+                    for d, evs in setups.items():
+                        await bus.publish(f"structure.{d}", MinuteSetups(ts, d, evs))
 
         async def pipeline_task(direction: str):
             sub = q[direction]
             while True:
-                sev = await sub.get()
-                cand = self.evaluate(sev)
-                if cand is None:
-                    if health is not None:
-                        health("strategy_error", direction, sev.instrument_key)
-                    continue
-                await bus.publish(f"signals.{direction}", cand)
+                msg = await sub.get()
+                n_err = self.pipelines[direction].counters["errors"]
+                cands = self.evaluate_minute(direction, msg.events)
+                if health is not None and self.pipelines[direction].counters["errors"] > n_err:
+                    health("strategy_error", direction,
+                           ",".join(e.instrument_key for e, _i in msg.events))
+                await bus.publish(f"signals.{direction}", MinuteSignals(msg.ts, direction, cands))
 
         tasks = [asyncio.create_task(structure_task(), name="structure"),
                  *(asyncio.create_task(pipeline_task(d), name=f"pipeline.{d}")
