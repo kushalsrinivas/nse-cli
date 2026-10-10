@@ -570,11 +570,28 @@ def walk_forward_calibration(trades: list[Trade], *, min_train: int = 100,
 
 @dataclass
 class OptionLayerConfig:
-    lot_size: int = 65
+    """Option-layer settings. Lot size is NEVER a constant here: `lot_for`
+    resolves it from the contract master as of the trade date (data/lots.py).
+    `lot_size` exists only to pin a value in tests."""
+    lot_for: object = None                   # callable(date_iso, tradingsymbol|None) -> int|None
+    lot_size: int | None = None
     strike_step: int = 50
     expiry_weekday: int = 1                  # Tuesday; overridden by master expiries
     half_spread_frac: float = 0.0075         # of premium, when no quotes exist
     min_dte_overnight: int = 2
+    entry_quote_lookback_sec: int = 10       # last quote at or before the fill
+    exit_quote_window_sec: int = 60          # first executable quote at/after the exit
+    gap_quote_window_sec: int = 300          # 09:15:00-09:20:00 for opening gaps
+
+    def lot(self, day: str, symbol: str | None = None) -> int | None:
+        if self.lot_size:
+            return self.lot_size
+        if self.lot_for is None:
+            return None
+        try:
+            return self.lot_for(day, symbol)
+        except Exception:
+            return None
 
 
 def _next_expiry(d: date, cfg: OptionLayerConfig, min_dte: int,
@@ -591,9 +608,25 @@ def _next_expiry(d: date, cfg: OptionLayerConfig, min_dte: int,
     return e
 
 
+def _priced(layer: str, t: Trade, buy: float, sell: float, lot: int | None, costs,
+            **extra) -> dict:
+    """Per-unit P&L always; rupees only when the contract lot is known."""
+    out = {"layer": layer, "buy": round(buy, 2), "sell": round(sell, 2),
+           "pnl_points": round(sell - buy, 2), "lot": lot, "horizon": t.horizon,
+           "direction": t.direction, "session": t.session, "exit_reason": t.reason, **extra}
+    if lot:
+        charges = costs.round_trip(buy, sell, lot, long=True)
+        out.update(charges=charges, pnl_rupees=round((sell - buy) * lot - charges, 2),
+                   premium_rupees=round(buy * lot, 2))
+    else:
+        out.update(charges=None, pnl_rupees=None, premium_rupees=None)
+    return out
+
+
 def synthetic_option_pnl(t: Trade, vix_by_date: dict[str, float], cfg: OptionLayerConfig,
                          costs, expiries: list[str] | None = None) -> dict | None:
-    """ATM long option repriced with BS at VIX. PROVISIONAL by definition."""
+    """ATM long option repriced with BS at VIX. PROVISIONAL by definition:
+    it never counts toward the options-execution gate (Gate B)."""
     from model.forecast.position import MEASURED_IV_CHANGE
     from model.options_ev import bs_price
     vix = vix_by_date.get(t.session)
@@ -613,18 +646,17 @@ def synthetic_option_pnl(t: Trade, vix_by_date: dict[str, float], cfg: OptionLay
     mid_out = bs_price(t.exit, strike, dte_out, iv_out, is_call)
     hs_in, hs_out = mid_in * cfg.half_spread_frac, mid_out * cfg.half_spread_frac
     buy, sell = mid_in + hs_in, max(mid_out - hs_out, 0.05)
-    qty = cfg.lot_size
-    charges = costs.round_trip(buy, sell, qty, long=True)
-    pnl = (sell - buy) * qty - charges
-    return {"layer": "synthetic", "strike": strike, "expiry": exp.isoformat(),
-            "buy": round(buy, 2), "sell": round(sell, 2), "charges": charges,
-            "pnl_rupees": round(pnl, 2), "premium_rupees": round(buy * qty, 2)}
+    return _priced("synthetic", t, buy, sell, cfg.lot(t.session), costs,
+                   strike=strike, expiry=exp.isoformat())
 
 
 def archived_option_pnl(t: Trade, archive, symbol_for, cfg: OptionLayerConfig, costs,
                         expiries: list[str] | None = None) -> dict | None:
-    """Real contract priced from recorded quotes (ask in, bid out) or candles
-    plus the configured half-spread. None (excluded) when neither exists."""
+    """The real contract, priced from recorded quotes: the ask at entry, the
+    first executable bid at/after the exit. A gap exit takes the first bid at
+    or after 09:15:00 — never the stop price, never last evening's book.
+    Candles plus a half-spread are a fallback only for non-gap exits.
+    Returns None (trade EXCLUDED) when no executable price exists."""
     if t.exit_ts is None:
         return None
     is_call = t.direction == BULLISH
@@ -635,64 +667,110 @@ def archived_option_pnl(t: Trade, archive, symbol_for, cfg: OptionLayerConfig, c
     if not sym:
         return None
 
-    def price(at: datetime, side: str) -> tuple[float, str] | None:
-        lo = (at - timedelta(seconds=10)).isoformat(timespec="seconds")
-        qs = archive.quotes(sym, frm=lo, to=at.isoformat(timespec="seconds"))
-        qs = [q for q in qs if (q.ask if side == "BUY" else q.bid)]
+    def iso(x: datetime) -> str:
+        return x.isoformat(timespec="seconds")
+
+    def entry_price(at: datetime):
+        qs = archive.quotes(sym, frm=iso(at - timedelta(seconds=cfg.entry_quote_lookback_sec)),
+                            to=iso(at))
+        qs = [q for q in qs if q.ask and q.bid and q.ask >= q.bid]
         if qs:
-            q = qs[-1]
-            return (q.ask if side == "BUY" else q.bid), "quote"
+            return qs[-1].ask, "quote"
         bars = archive.read_option_bars(sym, (at - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M"),
                                         at.strftime("%Y-%m-%d %H:%M"))
         if bars.empty:
             return None
         px = float(bars["open"].iloc[-1])
-        hs = px * cfg.half_spread_frac
-        return (px + hs if side == "BUY" else px - hs), "candle"
+        return px * (1 + cfg.half_spread_frac), "candle"
 
-    entry = price(t.entry_ts, "BUY")
-    exit_ = price(t.exit_ts, "SELL")
+    def exit_price(at: datetime, gap: bool):
+        if gap:
+            start = at.replace(hour=9, minute=15, second=0)
+            window = cfg.gap_quote_window_sec
+        else:
+            start = at - timedelta(seconds=cfg.entry_quote_lookback_sec)
+            window = cfg.exit_quote_window_sec + cfg.entry_quote_lookback_sec
+        qs = archive.quotes(sym, frm=iso(start), to=iso(start + timedelta(seconds=window)))
+        qs = [q for q in qs if q.bid and q.ask and q.ask >= q.bid]
+        if qs:
+            return qs[0].bid, "gap_quote" if gap else "quote"
+        if gap:
+            return None                     # no executable open quote → excluded
+        bars = archive.read_option_bars(sym, (at - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M"),
+                                        at.strftime("%Y-%m-%d %H:%M"))
+        if bars.empty:
+            return None
+        px = float(bars["open"].iloc[-1])
+        return px * (1 - cfg.half_spread_frac), "candle"
+
+    entry = entry_price(t.entry_ts)
+    exit_ = exit_price(t.exit_ts, gap=t.reason == "gap")
     if entry is None or exit_ is None:
         return None
-    qty = cfg.lot_size
-    charges = costs.round_trip(entry[0], exit_[0], qty, long=True)
-    pnl = (exit_[0] - entry[0]) * qty - charges
-    return {"layer": "archived", "symbol": sym, "buy": round(entry[0], 2),
-            "sell": round(exit_[0], 2), "source": f"{entry[1]}/{exit_[1]}",
-            "charges": charges, "pnl_rupees": round(pnl, 2),
-            "premium_rupees": round(entry[0] * qty, 2)}
+    return _priced("archived", t, entry[0], exit_[0], cfg.lot(t.session, sym), costs,
+                   symbol=sym, source=f"{entry[1]}/{exit_[1]}")
 
 
 def option_layer(trades: list[Trade], *, vix_by_date=None, archive=None, symbol_for=None,
                  cfg: OptionLayerConfig | None = None, costs=None,
-                 expiries: list[str] | None = None) -> dict:
+                 expiries: list[str] | None = None, sessions: list[str] | None = None) -> dict:
     from execution.costs import DEFAULT_COSTS
     cfg = cfg or OptionLayerConfig()
     costs = costs or DEFAULT_COSTS
     out = {}
     if vix_by_date:
         rows = [synthetic_option_pnl(t, vix_by_date, cfg, costs, expiries) for t in trades]
-        rows = [r for r in rows if r]
-        out["synthetic"] = _option_summary(rows, "PROVISIONAL")
+        out["synthetic"] = _option_summary([r for r in rows if r], "PROVISIONAL", sessions)
     if archive is not None and symbol_for is not None:
         rows = [archived_option_pnl(t, archive, symbol_for, cfg, costs, expiries) for t in trades]
         kept = [r for r in rows if r]
-        s = _option_summary(kept, "VALIDATED" if len(kept) >= 40 else "INSUFFICIENT")
+        s = _option_summary(kept, "ARCHIVED", sessions)
         s["excluded_no_data"] = len(trades) - len(kept)
+        s["coverage"] = round(len(kept) / len(trades), 3) if trades else 0.0
         out["archived"] = s
     return out
 
 
-def _option_summary(rows: list[dict], label: str) -> dict:
+def _option_summary(rows: list[dict], label: str, sessions: list[str] | None = None) -> dict:
     if not rows:
-        return {"label": label, "n": 0}
-    pnl = np.array([r["pnl_rupees"] for r in rows])
-    return {"label": label, "n": len(rows),
-            "expectancy_rupees": round(float(pnl.mean()), 1),
-            "total_rupees": round(float(pnl.sum()), 1),
-            "win_rate": round(float((pnl > 0).mean()), 4),
-            "avg_charges": round(float(np.mean([r["charges"] for r in rows])), 2),
-            "avg_premium": round(float(np.mean([r["premium_rupees"] for r in rows])), 1)}
+        return {"label": label, "n": 0, "rows": []}
+    pts = np.array([r["pnl_points"] for r in rows])
+    rup = [r for r in rows if r["pnl_rupees"] is not None]
+    out = {"label": label, "n": len(rows), "n_with_lot": len(rup),
+           "expectancy_points": round(float(pts.mean()), 2),
+           "win_rate": round(float((pts > 0).mean()), 4), "rows": rows}
+    if rup:
+        pnl = np.array([r["pnl_rupees"] for r in rup])
+        out.update(expectancy_rupees=round(float(pnl.mean()), 1),
+                   total_rupees=round(float(pnl.sum()), 1),
+                   avg_charges=round(float(np.mean([r["charges"] for r in rup])), 2),
+                   avg_premium=round(float(np.mean([r["premium_rupees"] for r in rup])), 1))
+        out["expectancy_ci"] = list(_session_ci(rup, sessions))
+    else:
+        out["note"] = "no trade date had a known contract lot — ₹ figures withheld"
+    return out
+
+
+def _session_ci(rows: list[dict], sessions: list[str] | None, draws: int = 2000,
+                seed: int = 17) -> tuple[float, float]:
+    """Per-trade ₹ expectancy CI, bootstrapped in session blocks."""
+    by = defaultdict(list)
+    for r in rows:
+        by[r["session"]].append(r["pnl_rupees"])
+    sess = sessions or sorted(by)
+    sums = np.array([sum(by.get(s, [])) for s in sess])
+    counts = np.array([len(by.get(s, [])) for s in sess])
+    if counts.sum() == 0:
+        return float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    stats = []
+    for _ in range(draws):
+        idx = _block_resample(len(sess), rng)
+        c = counts[idx].sum()
+        if c:
+            stats.append(sums[idx].sum() / c)
+    lo, hi = np.percentile(stats, [2.5, 97.5])
+    return round(float(lo), 1), round(float(hi), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +797,10 @@ def summarize(res: RunResult, *, grid_frac: float | None = None,
         block["verdict"] = verdict(res, h, grid_frac).to_dict()
         out["horizons"][h] = block
     if options is not None:
-        out["options"] = options
+        # Per-trade rows stay out of the persisted summary (they are large and
+        # live in the returned object); the summary keeps the statistics.
+        out["options"] = {k: {kk: vv for kk, vv in v.items() if kk != "rows"}
+                          for k, v in options.items()}
     if calibration is not None:
         # Steps are kept: the live service reads them back to map score → P(win)
         # once calibration has positive Brier skill (§4.4).

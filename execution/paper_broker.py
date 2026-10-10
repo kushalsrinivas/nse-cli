@@ -176,6 +176,8 @@ class PaperBroker:
     def _validate(self, rec: OrderRecord, lot_size: int | None) -> str:
         if rec.quantity <= 0:
             return "quantity must be positive"
+        if rec.purpose == "entry" and not lot_size:
+            return "entry without a contract lot size — refusing to size (data/lots.py)"
         if lot_size and rec.quantity % lot_size:
             return f"quantity {rec.quantity} not a multiple of lot {lot_size}"
         if rec.transaction_type not in ("BUY", "SELL"):

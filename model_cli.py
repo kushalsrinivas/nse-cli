@@ -1340,6 +1340,22 @@ def cmd_research(args) -> int:
     return 0
 
 
+#: Commands that size positions or compute rupee P&L. They refuse to run
+#: while config.lot_size disagrees with the contract master (data/lots.py).
+LOT_SIZED_COMMANDS = {
+    "evaluate", "backtest", "optimize", "overnight", "tonight", "premarket",
+    "confluence", "laya", "ob", "ob-paper", "ob-backtest", "ob-settle",
+    "overnight-journal", "oj", "confluence-journal", "cj", "journal",
+}
+
+
+def _lot_guard(cmd: str) -> str:
+    if cmd not in LOT_SIZED_COMMANDS:
+        return ""
+    from data.lots import check_config_lot
+    return check_config_lot()
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="NIFTY decision model CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1533,6 +1549,10 @@ def main() -> int:
     ob_cmds = register_ob(sub)
 
     args = p.parse_args()
+    lot_error = _lot_guard(args.cmd)
+    if lot_error:
+        console.print(f"[red]{lot_error}[/]")
+        return 2
     cmd_map = {
         "evaluate": cmd_evaluate,
         "backtest": cmd_backtest,

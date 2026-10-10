@@ -94,7 +94,7 @@ class PremarketResult:
     paper_risk: L7.RiskView | None = None
     paper_forced: bool = False
     paper_budget_rupees: float = 20_000.0
-    paper_lot_size: int = 75
+    paper_lot_size: int = SETTINGS.lot_size
 
 
 def _fit_gap_model(ds, latest_row) -> GapForecast | None:

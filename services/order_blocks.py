@@ -136,16 +136,18 @@ def _window(setup: Setup, now: datetime) -> tuple[bool, str]:
 def evaluate(setup: Setup, ctx: Context, *, chains: dict[str, list[LegQuote]],
              lot_size_for, book: BookState, governor: RiskGovernor | None = None,
              evidence: Evidence | None = None, params: ObParams | None = None,
-             rules: ContractRules | None = None, laya=None, laya_enforce: bool = False
-             ) -> Evaluation:
+             rules: ContractRules | None = None, laya=None, laya_enforce: bool = False,
+             expected_lot: int | None = None) -> Evaluation:
     params = params or ObParams()
     rules = rules or ContractRules()
     governor = governor or RiskGovernor()
     evidence = evidence or Evidence()
     p_win = evidence.p_win(setup.score.total)
 
+    from config import SETTINGS
     sel = select_contract(setup, chains, ctx.spot, ctx.now, vix=ctx.vix,
-                          lot_size_for=lot_size_for, rules=rules, p_win=p_win)
+                          lot_size_for=lot_size_for, rules=rules, p_win=p_win,
+                          expected_lot=expected_lot or SETTINGS.lot_size)
     choice = sel.choice
     sizing = None
     if choice is not None:
@@ -276,14 +278,12 @@ def book_state(journal: ObJournal, equity: float, now: datetime, *,
 # ---------------------------------------------------------------------------
 
 def lot_size_resolver(store, when: date | None = None):
-    day = (when or date.today()).isoformat()
+    """Contract lot from the master as of `when` (data/lots.py). Never config."""
+    from data.lots import contract_lot
+    day = when or date.today()
 
     def resolve(tradingsymbol: str) -> int | None:
-        lot = store.lot_size_on("NFO", tradingsymbol, day)
-        if lot:
-            return lot
-        row = store.find("NFO", tradingsymbol)
-        return row.lot_size if row else None
+        return contract_lot(tradingsymbol, day, store=store).lot
     return resolve
 
 
@@ -438,7 +438,7 @@ class PaperSession:
                  evidence: Evidence | None = None, events: list[str] | None = None,
                  spot_age=lambda: None, feed_ok=lambda: None, clock=datetime.now,
                  run_id: str = "live", laya=None, laya_enforce: bool = False,
-                 on_entry=None) -> None:
+                 on_entry=None, expected_lot: int | None = None) -> None:
         self.engine = engine
         self.journal = journal
         self.broker = broker
@@ -459,6 +459,7 @@ class PaperSession:
         self.laya = laya
         self.laya_enforce = laya_enforce
         self.on_entry = on_entry
+        self.expected_lot = expected_lot
         self.replaying = False
         self.last_bar: Bar | None = None
         self.prev_close_mark: dict[str, float] = {}
@@ -513,7 +514,8 @@ class PaperSession:
         ev = evaluate(setup, ctx, chains=chains, lot_size_for=self.lot_size_for,
                       book=book_state(self.journal, self.equity, now, marks=self._marks()),
                       governor=self.governor, evidence=self.evidence, params=self.p,
-                      rules=self.rules, laya=self.laya, laya_enforce=self.laya_enforce)
+                      rules=self.rules, laya=self.laya, laya_enforce=self.laya_enforce,
+                      expected_lot=self.expected_lot)
         ev.signal, ev.inserted = self.journal.add_signal(ev.signal)
         self.journal.log_event("signal", {"decision": ev.decision, "reasons": ev.reasons,
                                           "score": setup.score.total},
@@ -996,11 +998,20 @@ def run_backtest(*, frm: str, to: str, params: ObParams | None = None,
                     if r.strike == strike:
                         return r.tradingsymbol
                 return None
-        lot = _backtest_lot_size(store or None)
-        cfg = bt.OptionLayerConfig(lot_size=lot)
+        lot_for = None
+        if store:
+            from data.lots import contract_lot, nifty_lot
+
+            def lot_for(day, symbol=None, _store=store):
+                # As of the trade date only: a lot from today's master would
+                # silently re-size history across an NSE lot revision.
+                res = contract_lot(symbol, day, store=_store) if symbol else nifty_lot(day, store=_store)
+                return res.lot if res.source == "history" else None
+        cfg = bt.OptionLayerConfig(lot_for=lot_for)
         opt = bt.option_layer(res.trades, vix_by_date=vix or None,
                               archive=archive if symbol_for else None,
-                              symbol_for=symbol_for, cfg=cfg, expiries=expiries)
+                              symbol_for=symbol_for, cfg=cfg, expiries=expiries,
+                              sessions=res.sessions)
         layer_name = "archived" if (opt.get("archived") or {}).get("n") else (
             "synthetic" if opt.get("synthetic") else "none")
         if not vix:
@@ -1016,20 +1027,3 @@ def run_backtest(*, frm: str, to: str, params: ObParams | None = None,
     return out
 
 
-def _backtest_lot_size(store=None) -> int:
-    """Backtest lot size: current NIFTY lot from the master, else config.
-
-    The synthetic layer sizes every trade at today's lot; the archived layer
-    is per-contract by construction. Per-date lots need master history that
-    only exists from the day `kite-master` started versioning it.
-    """
-    if store is not None:
-        try:
-            from data.kite import instruments as ki
-            futs = ki.futures_chain(store, "NIFTY")
-            if futs and futs[0].lot_size:
-                return int(futs[0].lot_size)
-        except Exception:
-            pass
-    from config import SETTINGS
-    return SETTINGS.lot_size

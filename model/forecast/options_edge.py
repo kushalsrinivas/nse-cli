@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from config import SETTINGS
 from model.options_ev import bs_price, estimate_fees_per_lot, estimate_spread_cost
 
 #: Measured volatility risk premium: options have run ~19% rich. A long
@@ -113,7 +114,7 @@ def _structure_value(structure: Structure, spot_exit: float, dte_exit: float,
 
 
 def evaluate_structure(structure: Structure, spot: float, dist,
-                       *, lot_size: int = 75, holding_days: float = 1.0,
+                       *, lot_size: int = SETTINGS.lot_size, holding_days: float = 1.0,
                        iv_shift: float = 0.0,
                        implied_dist=None) -> StructureEV:
     """EV of `structure` under `dist`, priced against what you actually pay.

@@ -317,8 +317,8 @@ def _mark(legs_sides, spot: float, dte: float) -> float:
 def select_contract(setup: Setup, chains: dict[str, list[LegQuote]], spot: float,
                     now: datetime, *, vix: float, lot_size_for,
                     rules: ContractRules | None = None, p_win: float | None = None,
-                    shape: EmpiricalShape | None = None, lots_hint: int = 1
-                    ) -> Selection:
+                    shape: EmpiricalShape | None = None, lots_hint: int = 1,
+                    expected_lot: int | None = None) -> Selection:
     """Pick the max-EV structure that passes every filter.
 
     `chains` maps expiry → legs. `lot_size_for(tradingsymbol)` returns the
@@ -345,13 +345,28 @@ def select_contract(setup: Setup, chains: dict[str, list[LegQuote]], spot: float
         sel.rejected.extend(rej)
         dte = _dte(expiry, now)
         for name, kind, legs_sides in cands:
-            lot = None
+            # Lot size comes from the contract master as of the trade date
+            # (data/lots.py). Unknown, inconsistent across legs, or different
+            # from config.lot_size → the structure is rejected, never sized.
+            lots = set()
             for q, _s in legs_sides:
-                lot = q.lot_size or lot_size_for(q.tradingsymbol)
-                if lot:
+                master = lot_size_for(q.tradingsymbol)
+                if not master:
+                    lots.add(None)
                     break
-            if not lot:
+                if q.lot_size and q.lot_size != master:
+                    lots.add(-1)
+                lots.add(master)
+            if None in lots:
                 sel.rejected.append(f"{name} {expiry}: lot size unknown for trade date")
+                continue
+            if -1 in lots or len(lots) != 1:
+                sel.rejected.append(f"{name} {expiry}: legs disagree on lot size {sorted(lots)}")
+                continue
+            lot = lots.pop()
+            if expected_lot is not None and lot != expected_lot:
+                sel.rejected.append(f"{name} {expiry}: contract lot {lot} ≠ config.lot_size "
+                                    f"{expected_lot} — fix config before sizing")
                 continue
             bad = [leg_filter(q, lot * lots_hint, rules, buying=s > 0) for q, s in legs_sides]
             bad = [b for b in bad if b]

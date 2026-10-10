@@ -285,6 +285,11 @@ class OvernightJournal:
 
     # -- Settlement ------------------------------------------------------------
 
+    def _instrument_store(self):
+        """Contract master in the same database as this journal."""
+        from data.kite.store import InstrumentStore
+        return InstrumentStore(self.db_path)
+
     def settle(
         self,
         record_id: int,
@@ -299,7 +304,8 @@ class OvernightJournal:
 
         actual_flag = rec.is_actual_trade if is_actual is None else (1 if is_actual else 0)
         entry = rec.entry_price
-        lot_qty = (rec.contracts or 1) * 75
+        from data.lots import lot_for_settlement
+        lot_qty = (rec.contracts or 1) * lot_for_settlement(rec.trade_date, store=self._instrument_store())
         price_diff = exit_price - entry
         
         # Long Option PnL

@@ -152,7 +152,7 @@ def render_overnight(setup: OvernightSetup, console: Console | None = None) -> N
                          "Synthetic Forward", Text(forward_str, style="white"))
         vol_grid.add_row("18h Hold Implied Move", Text(implied_18h_str, style="white"),
                          "Cohort Forecast (1σ)", Text(cohort_sigma_str, style="white"))
-        vol_grid.add_row("Paid / Fair Option Ratio", Text(f"{best.paid_to_fair_ratio:.2f}× (Fair ₹{best.fair_premium_lot/75:,.1f})", style="yellow" if best.paid_to_fair_ratio > 1.1 else "green"),
+        vol_grid.add_row("Paid / Fair Option Ratio", Text(f"{best.paid_to_fair_ratio:.2f}× (Fair ₹{best.fair_premium_lot/setup.lot_size:,.1f})", style="yellow" if best.paid_to_fair_ratio > 1.1 else "green"),
                          "Volatility Edge Verdict", Text(best.vol_edge_verdict, style=f"bold {vol_style}"))
 
         vol_panel = Panel(vol_grid, title="[bold]Overnight Volatility Benchmark (Realized vs. Implied Straddle)[/]", box=ROUNDED)
@@ -171,10 +171,10 @@ def render_overnight(setup: OvernightSetup, console: Console | None = None) -> N
         bridge_table.add_column("Value (₹ / Lot)", justify="right")
 
         mean_pts = setup.spot * (setup.distribution.raw_mean_pct / 100.0) if setup.distribution else 0.0
-        bridge_table.add_row("Delta on Mean Move", f"{cand.delta:+.2f} × ({mean_pts:+.1f} pts) × 75", f"₹{best.delta_pnl_mean_lot:+,.0f}")
-        bridge_table.add_row("Gamma Convexity (Dist)", f"½ × {cand.gamma:.5f} × E[ΔS²] × 75", f"₹{best.gamma_convexity_dist_lot:+,.0f}")
-        bridge_table.add_row("Theta Decay (Hold)", f"-₹{abs(cand.theta):.1f}/d × {best.holding_days:.2f}d × 75", f"-₹{best.theta_cost_hold_lot:,.0f}")
-        bridge_table.add_row("Vega / IV Path Change", f"₹{cand.vega:.1f} × dIV × 75 (assumes IV drift)", f"₹{best.vega_pnl_lot:+,.0f}")
+        bridge_table.add_row("Delta on Mean Move", f"{cand.delta:+.2f} × ({mean_pts:+.1f} pts) × {setup.lot_size}", f"₹{best.delta_pnl_mean_lot:+,.0f}")
+        bridge_table.add_row("Gamma Convexity (Dist)", f"½ × {cand.gamma:.5f} × E[ΔS²] × {setup.lot_size}", f"₹{best.gamma_convexity_dist_lot:+,.0f}")
+        bridge_table.add_row("Theta Decay (Hold)", f"-₹{abs(cand.theta):.1f}/d × {best.holding_days:.2f}d × {setup.lot_size}", f"-₹{best.theta_cost_hold_lot:,.0f}")
+        bridge_table.add_row("Vega / IV Path Change", f"₹{cand.vega:.1f} × dIV × {setup.lot_size} (assumes IV drift)", f"₹{best.vega_pnl_lot:+,.0f}")
         bridge_table.add_row("Friction & Execution Fees", "Spread + Brokerage + STT + Taxes", f"-₹{best.friction_lot:,.0f}")
         bridge_table.add_row("Higher-Order Skew Residual", "Exact Scenario Integration Residual", f"₹{best.higher_order_residual_lot:+,.0f}")
         bridge_table.add_row("[bold]Reconciled Net EV[/]", "[bold]Integrated Full Distribution (Exact Footing)[/]", Text(f"₹{best.net_ev_per_lot:+,.0f}", style=ev_style))
@@ -277,7 +277,7 @@ def render_overnight(setup: OvernightSetup, console: Console | None = None) -> N
         sz_grid.add_column()
         sz_grid.add_column(style="dim")
         sz_grid.add_column()
-        sz_grid.add_row("Approved Sizing", f"[bold green]{setup.sizing.contracts} Lots[/] ({setup.sizing.contracts * 75} Units)",
+        sz_grid.add_row("Approved Sizing", f"[bold green]{setup.sizing.contracts} Lots[/] ({setup.sizing.contracts * setup.lot_size} Units)",
                         "Max Account Risk", f"₹{setup.sizing.max_risk_rupees:,.0f} ({setup.sizing.risk_pct * 100:.2f}% equity)")
         body_elements.append(sz_grid)
 

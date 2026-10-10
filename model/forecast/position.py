@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from config import SETTINGS
 from model.options_ev import bs_price, estimate_fees_per_lot, estimate_spread_cost
 
 #: Measured mean change in India VIX (points) over a hold entered on this
@@ -190,7 +191,7 @@ def _mark(legs, spot_exit: float, dte: float, iv_shift_pts: float) -> float:
 
 
 def evaluate_exit(legs, spot: float, gap_dist, session_dist, dte: int, *,
-                  lots: int = 1, lot_size: int = 75,
+                  lots: int = 1, lot_size: int = SETTINGS.lot_size,
                   iv_change_pts: float = 0.0,
                   iv_change_note: str = "") -> ExitOutlook:
     """Mark the position across the gap distribution, then across the day.

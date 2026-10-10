@@ -198,7 +198,63 @@ class TestOptionLayers(unittest.TestCase):
         self.assertEqual((r["buy"], r["sell"], r["source"]), (151, 190, "quote/quote"))
         out = option_layer([t, self._trade(25050)], archive=a, symbol_for=sym, cfg=cfg)
         self.assertEqual(out["archived"]["n"], 2)
-        self.assertEqual(out["archived"]["label"], "INSUFFICIENT")
+        self.assertEqual(out["archived"]["label"], "ARCHIVED")
+        self.assertEqual(out["archived"]["coverage"], 1.0)
+
+    def test_gap_exit_uses_first_open_quote_never_stop_or_last_evening(self):
+        from data.kite.archive import MarketArchive, OptionQuote
+        from execution.costs import DEFAULT_COSTS
+        from model.order_blocks.backtest import (
+            OptionLayerConfig,
+            Trade,
+            archived_option_pnl,
+        )
+        a = MarketArchive(os.path.join(tempfile.mkdtemp(), "a.db"))
+        cfg = OptionLayerConfig(lot_size=65)
+        sym = lambda e, k, ty: "NIFTY25000CE"   # noqa: E731
+        t = Trade("OB", "overnight", "bullish", "2026-10-06", datetime(2026, 10, 6, 15, 15),
+                  datetime(2026, 10, 6, 15, 20), 25000, 24940, 25150)
+        t.exit, t.exit_ts, t.reason = 24900.0, datetime(2026, 10, 7, 9, 16), "gap"
+        a.add_quotes([
+            OptionQuote("NFO", "NIFTY25000CE", "2026-10-06T15:19:58", bid=150, ask=151),
+            OptionQuote("NFO", "NIFTY25000CE", "2026-10-06T15:29:59", bid=148, ask=149),  # last evening
+            OptionQuote("NFO", "NIFTY25000CE", "2026-10-07T09:15:04", bid=0, ask=95),     # one-sided
+            OptionQuote("NFO", "NIFTY25000CE", "2026-10-07T09:15:09", bid=96, ask=99),
+            OptionQuote("NFO", "NIFTY25000CE", "2026-10-07T09:15:40", bid=101, ask=102)])
+        r = archived_option_pnl(t, a, sym, cfg, DEFAULT_COSTS)
+        self.assertEqual((r["sell"], r["source"]), (96, "quote/gap_quote"))
+
+    def test_gap_without_open_quote_is_excluded(self):
+        from data.kite.archive import MarketArchive, OptionBar, OptionQuote
+        from execution.costs import DEFAULT_COSTS
+        from model.order_blocks.backtest import (
+            OptionLayerConfig,
+            Trade,
+            archived_option_pnl,
+        )
+        a = MarketArchive(os.path.join(tempfile.mkdtemp(), "a.db"))
+        sym = lambda e, k, ty: "NIFTY25000CE"   # noqa: E731
+        t = Trade("OB", "overnight", "bullish", "2026-10-06", datetime(2026, 10, 6, 15, 15),
+                  datetime(2026, 10, 6, 15, 20), 25000, 24940, 25150)
+        t.exit, t.exit_ts, t.reason = 24900.0, datetime(2026, 10, 7, 9, 16), "gap"
+        a.add_quotes([OptionQuote("NFO", "NIFTY25000CE", "2026-10-06T15:19:58", bid=150, ask=151)])
+        a.upsert_option_bars([OptionBar("NFO", "NIFTY25000CE", "2026-10-07 09:15", 90, 92, 88, 91)])
+        self.assertIsNone(archived_option_pnl(t, a, sym, OptionLayerConfig(lot_size=65), DEFAULT_COSTS))
+
+    def test_unknown_lot_withholds_rupees_keeps_points(self):
+        from execution.costs import DEFAULT_COSTS
+        from model.order_blocks.backtest import (
+            OptionLayerConfig,
+            option_layer,
+            synthetic_option_pnl,
+        )
+        cfg = OptionLayerConfig(lot_for=lambda day, sym=None: None)
+        r = synthetic_option_pnl(self._trade(25100), {"2026-10-06": 13.0}, cfg, DEFAULT_COSTS)
+        self.assertIsNone(r["pnl_rupees"])
+        self.assertGreater(r["pnl_points"], 0)
+        out = option_layer([self._trade(25100)], vix_by_date={"2026-10-06": 13.0}, cfg=cfg)
+        self.assertEqual(out["synthetic"]["n_with_lot"], 0)
+        self.assertIn("withheld", out["synthetic"]["note"])
 
 
 class TestContractSelection(unittest.TestCase):
@@ -244,6 +300,20 @@ class TestContractSelection(unittest.TestCase):
         self.assertLess(c.o_stop, c.o_entry)
         self.assertGreater(c.o_target, c.o_entry)
         self.assertEqual(c.lot_size, 65)
+
+    def test_lot_mismatch_fails_closed(self):
+        from model.order_blocks.contract import select_contract
+        now = datetime(2026, 10, 6, 11, 0)
+        sel = select_contract(self._setup(), {"2026-10-13": self._legs(now)}, 25000, now,
+                              vix=13.0, lot_size_for=lambda s: 65, p_win=0.6, expected_lot=75)
+        self.assertIsNone(sel.choice)
+        self.assertTrue(any("config.lot_size" in r for r in sel.rejected))
+        legs = self._legs(now)
+        for q in legs:
+            q.lot_size = 75                      # quote disagrees with master
+        sel = select_contract(self._setup(), {"2026-10-13": legs}, 25000, now,
+                              vix=13.0, lot_size_for=lambda s: 65, p_win=0.6)
+        self.assertTrue(any("disagree" in r for r in sel.rejected))
 
     def test_wide_spread_and_low_oi_filtered(self):
         from model.order_blocks.contract import select_contract

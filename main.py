@@ -442,6 +442,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_cache:
         print(f"cleared {shared_cache().clear()} cache entries")
 
+    # Lot size comes from the contract master; a stale config.lot_size would
+    # mis-size every position and P&L. Sizing/settling modes fail closed.
+    from data.lots import check_config_lot
+    lot_error = check_config_lot()
+    sizing = ("tonight", "confluence", "intraday_live", "settle_overnight",
+              "settle_confluence")
+    if lot_error and (any(getattr(args, f, False) for f in sizing)
+                      or not any(getattr(args, f, False) for f, _ in MODES)):
+        print(f"ERROR: {lot_error}", file=sys.stderr)
+        return 2
+
     for flag, handler in MODES:
         if getattr(args, flag):
             return handler(args)

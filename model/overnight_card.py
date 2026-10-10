@@ -96,7 +96,7 @@ class OvernightSetup:
     chosen: object = None
     candidates: list[object] = field(default_factory=list)
     # Contract size this setup was evaluated with (== settings.lot_size).
-    lot_size: int = 75
+    lot_size: int = SETTINGS.lot_size
     # S/R-derived spot targets for the trade direction. Keys: t1, t1_pts,
     # t1_pct, t2, t2_pts, t2_pct, reversal (str|None), label. Empty when
     # direction is neutral or levels are unavailable. Display only.

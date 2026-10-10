@@ -333,7 +333,7 @@ class TestPaperSession(unittest.TestCase):
             broker=broker, chains=legs, book_for=book_for, lot_size_for=lambda s: 65,
             vix=13.0, equity=equity, params=ObParams(rvol_min=1.0, eligible_at=40.0),
             rules=ContractRules(min_oi=0), evidence=ev, spot_age=lambda: 1.0,
-            feed_ok=lambda: True, clock=clock)
+            feed_ok=lambda: True, clock=clock, expected_lot=65)
         return session, state
 
     def _drive(self, session, state, clock, bars):

@@ -225,6 +225,26 @@ class InstrumentStore:
             instrument_type=row["instrument_type"], segment="",
             as_of=row["as_of"])
 
+    def history_front_future(self, underlying: str, date: str) -> InstrumentRow | None:
+        """The nearest-expiry future of `underlying` live on `date`, with the
+        attributes known on that date (latest version with as_of <= date)."""
+        rows = self.conn.execute(
+            "SELECT h.* FROM kite_instrument_history h WHERE h.exchange='NFO' "
+            "AND h.instrument_type='FUT' AND h.expiry>=? AND h.as_of<=? "
+            "AND h.as_of = (SELECT MAX(as_of) FROM kite_instrument_history x "
+            "  WHERE x.exchange=h.exchange AND x.tradingsymbol=h.tradingsymbol AND x.as_of<=?) "
+            "ORDER BY h.expiry", (date, date, date)).fetchall()
+        for row in rows:
+            sym = row["tradingsymbol"]
+            if sym.startswith(underlying) and sym[len(underlying):len(underlying) + 1].isdigit():
+                return InstrumentRow(
+                    instrument_token=row["instrument_token"], exchange=row["exchange"],
+                    tradingsymbol=sym, name=row["name"], expiry=row["expiry"],
+                    strike=row["strike"], tick_size=row["tick_size"],
+                    lot_size=row["lot_size"], instrument_type=row["instrument_type"],
+                    segment="", as_of=row["as_of"])
+        return None
+
     def lot_size_on(self, exchange: str, tradingsymbol: str,
                     date: str) -> int | None:
         row = self.as_of_on(exchange, tradingsymbol, date)

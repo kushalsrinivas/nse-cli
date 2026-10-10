@@ -23,6 +23,7 @@ from datetime import datetime
 import numpy as np
 
 from analysis.signals import Direction
+from config import SETTINGS
 from data.options import ChainRow, OptionChain, OptionLeg
 from model.magnitude import DistributionalMove
 
@@ -289,7 +290,7 @@ class StrategyEV:
 # Friction & Fee Estimators (NSE India standard rates)
 # ---------------------------------------------------------------------------
 
-def estimate_fees_per_lot(premium: float, lot_size: int = 75) -> float:
+def estimate_fees_per_lot(premium: float, lot_size: int = SETTINGS.lot_size) -> float:
     """Estimate round-trip fees for 1 lot (Brokerage ₹40 + STT + Exchange + GST + Stamp)."""
     turnover = premium * lot_size
     brokerage = 40.0                      # Standard discount broker ₹20 buy + ₹20 sell
@@ -355,7 +356,7 @@ def generate_strategy_candidates(
     spot: float,
     direction: Direction,
     target_expiry: str | None = None,
-    lot_size: int = 75,
+    lot_size: int = SETTINGS.lot_size,
     underlying: str = "NIFTY",
 ) -> list[StrategyCandidate]:
     """Generate and price ITM, ATM, and Debit Spread candidates from option chain."""
@@ -533,7 +534,7 @@ def evaluate_strategy(
     dist: DistributionalMove,
     expected_delta_iv: float = 0.0,
     holding_days: float = 0.75,
-    lot_size: int = 75,
+    lot_size: int = SETTINGS.lot_size,
     vix_level: float = 10.56,
 ) -> StrategyEV:
     """Evaluate candidate payoff across the empirical distribution of raw market moves."""
@@ -812,7 +813,7 @@ def rank_and_select_best_strategy(
     dist: DistributionalMove,
     expected_delta_iv: float = 0.0,
     holding_days: float = 0.75,
-    lot_size: int = 75,
+    lot_size: int = SETTINGS.lot_size,
     vix_level: float = 10.56,
     selection_haircut: float = 0.05,
 ) -> tuple[StrategyEV | None, list[StrategyEV]]:
