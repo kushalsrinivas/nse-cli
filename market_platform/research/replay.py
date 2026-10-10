@@ -171,6 +171,8 @@ class Replay:
                             bucket = b0.ts.replace(minute=b0.ts.minute - b0.ts.minute % 5)
                             if bucket != last_ctx:
                                 ctx.compute(b0.end)
+                                if b0.ts.minute % 15 == 0:      # dashboard / audit trail
+                                    ctx.persist(app, rid)
                                 last_ctx = bucket
                         minute = {}
                     if bar is None:

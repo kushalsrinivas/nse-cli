@@ -54,7 +54,7 @@ class BullishRules(DirectionRules):
     def gap_reject(self, cand: SignalCandidate, ctx_view: dict) -> str:
         gap_open = ctx_view.get("day_open")
         if gap_open is not None and cand.atr and gap_open > cand.zone_high + cand.atr:
-            return f"open {gap_open} > zone_high {cand.zone_high} + 1 ATR"
+            return f"open {gap_open:.2f} > zone_high {cand.zone_high} + 1 ATR ({cand.atr:.2f})"
         return ""
 
     def executability(self, cand: SignalCandidate, instrument: dict | None) -> tuple[bool, list[str], str]:
