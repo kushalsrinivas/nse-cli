@@ -31,7 +31,7 @@ def short_hash(*parts) -> str:
     return hashlib.sha1("|".join(str(p) for p in parts).encode()).hexdigest()[:16]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Bar:
     ts: datetime              # bin start, IST naive
     tf: str
@@ -59,7 +59,7 @@ class Bar:
         return self.close < self.open
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Swing:
     kind: str                 # 'high' | 'low'
     price: float
@@ -68,7 +68,7 @@ class Swing:
     confirmed_ts: datetime    # close of pivot+k bar — earliest it is knowable
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Break:
     direction: str            # bullish | bearish
     kind: str                 # BOS | CHOCH

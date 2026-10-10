@@ -21,6 +21,7 @@ from data.kite.auth import (
     read_api_key,
     session_valid,
 )
+from data.kite.readonly import read_only
 
 log = logging.getLogger(__name__)
 
@@ -69,14 +70,15 @@ def kite_client():
             "kiteconnect is not installed (pip install kiteconnect)") from exc
     client = KiteConnect(api_key=api_key)
     client.set_access_token(session["access_token"])
-    return client
+    # Never hand out the raw SDK: it can place orders. Data methods only.
+    return read_only(client)
 
 
 class KiteRest:
     """Thin rate-limited wrapper; payloads normalized by loaders below."""
 
     def __init__(self, client=None) -> None:
-        self.client = client or kite_client()
+        self.client = read_only(client or kite_client())
 
     def instruments(self, exchange: str | None = None):
         _limiters["other"].acquire()

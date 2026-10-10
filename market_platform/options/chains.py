@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime
 
 from market_platform.options.pricing import ChainSnapshot
@@ -37,13 +38,50 @@ def _iv_from_mid(spot, strike, dte, mid, is_call) -> float | None:
     return implied_vol(spot, strike, dte, mid, is_call) if mid else None
 
 
+def _db_file(conn) -> str | None:
+    for _seq, name, path in conn.execute("PRAGMA database_list"):
+        if name == "main" and path:
+            return path
+    return None
+
+
+class _ThreadLocalDbs:
+    """Pricing runs in worker threads (asyncio.to_thread); SQLite connections
+    must not cross threads, so each thread opens its own on the same files."""
+
+    def __init__(self, store, market_conn) -> None:
+        self._store_path = getattr(store, "db_path", None) if store is not None else None
+        self._market_path = _db_file(market_conn) if market_conn is not None else None
+        self._owner = threading.get_ident()
+        self._main = (store, market_conn)
+        self._local = threading.local()
+
+    def get(self):
+        if threading.get_ident() == self._owner:
+            return self._main
+        if not hasattr(self._local, "dbs"):
+            from data.kite.store import InstrumentStore
+            from market_platform.persistence.db import connect
+            st = InstrumentStore(self._store_path) if self._store_path else None
+            mk = connect(self._market_path) if self._market_path else None
+            self._local.dbs = (st, mk)
+        return self._local.dbs
+
+
 class KiteChainProvider:
     def __init__(self, rest, store, market_conn=None, *, wings: int = 10, expiries: int = 2) -> None:
         self.rest = rest
-        self.store = store
-        self.market = market_conn
+        self._dbs = _ThreadLocalDbs(store, market_conn)
         self.wings = wings
         self.n_expiries = expiries
+
+    @property
+    def store(self):
+        return self._dbs.get()[0]
+
+    @property
+    def market(self):
+        return self._dbs.get()[1]
 
     def _contracts(self, underlying: str, now: datetime):
         exch = "BFO" if underlying in ("SENSEX", "BANKEX") else "NFO"
@@ -114,10 +152,17 @@ class KiteChainProvider:
 class ArchiveChainProvider:
     def __init__(self, market_conn, store=None, *, max_age_sec: float = 120.0,
                  vix_key: str = VIX_KEY) -> None:
-        self.market = market_conn
-        self.store = store
+        self._dbs = _ThreadLocalDbs(store, market_conn)
         self.max_age = max_age_sec
         self.vix_key = vix_key
+
+    @property
+    def store(self):
+        return self._dbs.get()[0]
+
+    @property
+    def market(self):
+        return self._dbs.get()[1]
 
     def __call__(self, underlying: str, now: datetime) -> ChainSnapshot | None:
         lo = datetime.fromtimestamp(now.timestamp() - self.max_age).isoformat(timespec="seconds")
