@@ -15,8 +15,13 @@ python main.py --tonight               # one EOD verdict card (dry-run default)
 python main.py --tonight --verbose --journal   # full audit trail + record it
 ```
 
-Python ≥ 3.10 (the multi-market platform needs ≥ 3.11 for `tomllib`). Market
-data needs network (yfinance/NSE by default; Kite with a session — see below).
+**Python ≥ 3.11** (the platform uses `tomllib`; yfinance ≥ 1.6 needs
+`curl_cffi` ≥ 0.15, which has no release for Python < 3.10). Market data needs
+network (yfinance/NSE by default; Kite with a session — see below).
+
+If `pip install` fails with *"yfinance … depends on curl_cffi>=0.15 … conflicting
+dependencies"*, the venv was made with an older Python. Check `python --version`
+inside the venv and recreate it: `rm -rf .venv && python3.12 -m venv .venv`.
 
 ### Multi-market order-block platform (paper)
 

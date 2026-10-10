@@ -3,7 +3,7 @@ name = "nifty-strats"
 version = "0.1.0"
 description = "NIFTY 50 terminal trading dashboard: decision model, overnight options engine, constituent breadth, and Kite market-data service (paper trading only)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
     "yfinance>=1.6.0",
@@ -13,6 +13,8 @@ dependencies = [
     "textual>=1.0",
     "kiteconnect>=5.2.1",
     "websockets>=15.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]

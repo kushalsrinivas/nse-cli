@@ -16,6 +16,10 @@ import argparse
 import sys
 from pathlib import Path
 
+if sys.version_info < (3, 11):
+    sys.exit(f"platform_cli needs Python 3.11+ (found {sys.version.split()[0]}); "
+             "create the venv with python3.11 or newer.")
+
 from rich.console import Console
 from rich.table import Table
 
