@@ -59,6 +59,20 @@ class DataConfig:
     max_ws_connections: int = 3
     max_tokens_per_connection: int = 3000
     backfill_days: int = 365
+    #: WS mode for equities/stock futures. Kite `quote` packets carry no
+    #: exchange timestamp (bars would be bucketed on arrival time) and no
+    #: depth (no spread), so `full` is the default; `quote` saves bandwidth.
+    equity_mode: str = "full"
+    #: Strikes either side of ATM for index (T4) and on-demand stock (T5) ladders.
+    index_ladder_wings: int = 10
+    stock_ladder_wings: int = 5
+    #: Historical-API request budget (Kite allows 3/s).
+    historical_rps: float = 3.0
+    #: Gap repair: re-fetch an instrument's session when more minutes than
+    #: this are missing; smaller gaps are logged as quality events.
+    repair_min_missing: int = 1
+    #: Price jump (vs previous close) flagged as a quality event, percent.
+    jump_alert_pct: float = 8.0
 
 
 @dataclass(frozen=True)
@@ -258,6 +272,11 @@ RANGES: dict[str, dict] = {
     "data.max_ws_connections": _rng(1, 3),
     "data.max_tokens_per_connection": _rng(1, 3000),
     "data.backfill_days": _rng(1, 4000, "days"),
+    "data.index_ladder_wings": _rng(1, 30),
+    "data.stock_ladder_wings": _rng(1, 20),
+    "data.historical_rps": _rng(0.1, 3.0, "req/s"),
+    "data.repair_min_missing": _rng(1, 375, "minutes"),
+    "data.jump_alert_pct": _rng(1, 50, "%"),
     "structure.pivot_k": _rng(1, 10),
     "structure.trigger_pivot_k": _rng(1, 10),
     "structure.atr_n": _rng(2, 100),
@@ -334,6 +353,8 @@ def cross_checks(cfg: PlatformConfig) -> list[str]:
     for tf in (*cfg.structure.detect_tfs, cfg.structure.trigger_tf, cfg.structure.htf):
         if tf not in cfg.data.timeframes:
             e.append(f"structure uses timeframe {tf!r} not listed in data.timeframes")
+    if cfg.data.equity_mode not in ("full", "quote"):
+        e.append("data.equity_mode must be 'full' or 'quote'")
     if cfg.data.max_ws_connections * cfg.data.max_tokens_per_connection < 100:
         e.append("data: subscription budget below 100 tokens")
     if not cfg.universe.indices and not cfg.universe.extra_symbols:

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
@@ -30,6 +30,7 @@ IST = ZoneInfo("Asia/Kolkata")
 SESSION_START = dtime(9, 15)
 SESSION_END = dtime(15, 30)
 LATE_GRACE_SEC = 5.0
+_ONE_MIN = timedelta(minutes=1)
 
 
 class _Bin:
@@ -138,6 +139,22 @@ class TickAggregator:
         del self._open
         self._open = {}
         return self._drain_due(force=True)
+
+    def settle_before(self, cutoff: datetime) -> list[MinuteCandle]:
+        """Clock-driven settle: close every bin whose minute ended at or
+        before `cutoff` (tz-aware) and return all pending candles that ended
+        by then. Without it an illiquid token's bar would wait for its next
+        tick; the platform calls this every second with now - grace."""
+        cut = cutoff.astimezone(IST)
+        for token, b in list(self._open.items()):
+            if b.minute + _ONE_MIN <= cut:
+                self._stage(token, b)
+        out, keep = [], []
+        for due_at, c in self._pending:
+            end = datetime.strptime(c.ts, "%Y-%m-%d %H:%M").replace(tzinfo=IST) + _ONE_MIN
+            (out if end <= cut else keep).append((due_at, c))
+        self._pending = keep
+        return [c for _, c in out]
 
     def open_bins(self) -> dict[int, str]:
         return {t: b.minute.strftime("%H:%M") for t, b in self._open.items()}
