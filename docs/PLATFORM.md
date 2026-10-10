@@ -287,12 +287,12 @@ The existing `scripts/ob-cron.example` NIFTY jobs keep working unchanged.
 
 ## 6. Test, load and recovery results
 
-`python -m unittest discover -s tests`: **580 tests, all passing; `ruff check .` is clean.**
+`python -m unittest discover -s tests`: **573 tests, all passing; `ruff check .` is clean.**
 
 | Suite | Tests | Covers |
 |---|---|---|
 | `test_platform_phase1` | 15 | config validation, migrations and checksums, writer batching/backpressure/isolation, legacy import, calendar, runs |
-| `test_platform_phase2` | 22 | catalogue, constituents, versioned membership and point-in-time queries, dedupe by token, eligibility, lots from the master (by date), no hardcoded lots, breadth shim, CLI |
+| `test_platform_phase2` | 24 | catalogue, constituents, versioned membership and point-in-time queries, dedupe by token, eligibility, lots from the master (by date), no hardcoded lots, breadth shim, CLI |
 | `test_platform_phase3` | 19 | planner tiers/budget/eviction/diffs, bus policies, pool, candle completion, **replay equivalence bit for bit**, restart without duplicates, 1,500-instrument throughput, backfill watermarks, repair, quality gate |
 | `test_platform_phase4` | 22 | bounded core equals unbounded, flat memory, OB-origin enforcement (runtime and source), **NIFTY baseline equivalence**, determinism, direction rules, pipeline isolation, scoring, clustering, context, correlation, live bus routing |
 | `test_platform_phase5` | 22 | costs, routes, governor checks/sizing/caps, options pricing (index and stock, deadline, process pool), chain providers, fills/gaps/exits/P&L, restart mid-trade, **concurrency (no double allocation)**, paper isolation (AST) |
@@ -301,7 +301,20 @@ The existing `scripts/ob-cron.example` NIFTY jobs keep working unchanged.
 | `test_platform_recovery` | 7 | WS drop → REST repair, DB locked and disk errors, **kill -9 mid-session → same later signals, no duplicate orders**, duplicate ticks and candles, missing candles, feed down → nothing approved |
 | `test_platform_phase8` | 3 | live paper runner end to end, load harness, daily reconciliation (0% mismatch) |
 
-**Load results:** being measured (`platform_cli.py load-test --tokens 1500 --minutes 16 --mult 1,2,4`); the table follows in the next commit.
+**Load (measured, `load-test --tokens 1500 --minutes 16`, one core, synthetic ticks with depth through the real live path):**
+
+| Load | Ticks | Ingest capacity | Headroom | Candle completion p99 | All-instrument structure + signals + risk p99 | Peak memory | Writer |
+|---|---|---|---|---|---|---|---|
+| 1× (1 tick/token/s) | 1.44 M | 33.5k ticks/s | 22× | 5.67 s | 0.45 s | 58 MB | 24k rows, 0 dropped, 0 backpressure |
+| 2× | 2.88 M | 33.3k ticks/s | 11× | 5.79 s | 0.45 s | 58 MB | same |
+| 4× | 5.76 M | 33.9k ticks/s | 5.6× | 5.64 s | 0.43 s | 58 MB | same |
+
+All §9.6 SLOs that the harness measures are met at 4× (targets: completion ≤ 7 s, structure ≤ 1 s, ≥ 2× tick rate).
+The writer measured on its own does **108k rows/s** (90k bar rows in 0.83 s); one minute of 1,500 bars commits in about 10 ms.
+**Caveat:** inside the harness the writer's commit latency reads about 10 s, because the synthetic generator keeps the
+event loop and the GIL busy for the whole minute. A live socket spends most of its time waiting on network I/O, so this
+does not apply to real sessions. The soak test (memory flat over 6 h) and the dashboard p95 test with live writes still
+have to be run during the paper period. The memory figure covers the data and decision path (tracemalloc), not process RSS.
 
 ## 7. Limitations and open items (honest)
 
