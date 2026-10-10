@@ -1020,31 +1020,53 @@ operational review.
 - **Freeze quantity** is a constant (`DEFAULT_FREEZE_QTY`) to verify
   against the current NSE circular.
 
-### 10.3 Daily runbook (IST, trading days)
+### 10.3 Review round 2: what changed
+
+| Review item | What the code does now | Where |
+|---|---|---|
+| Lot size 75 vs 65 | The contract master is the single source of truth. Sizing and P&L commands exit (code 2) with the exact fix when `config.lot_size` disagrees with it. Order-block paths take the lot of the selected contract as of its trade date and reject a structure whose lot is unknown, differs across legs or differs from config. The paper broker rejects an entry without a lot. Hardcoded 75s are gone. | `data/lots.py`, `model_cli.py`, `main.py`, `contract.py`, `paper_broker.py` |
+| Real historical options data | Every quote and option bar carries expiry, strike and CE/PE. The open (09:15–09:20) and close (15:15–15:30) are sampled every 15 s. Every signal, fill and exit snapshots full depth for the legs involved. `ob-coverage` reports per-session coverage and exits 1 on gaps. `scripts/ob-cron.example` runs collection daily. Synthetic results never count as validated. | `data/kite/archive.py`, `legs.py`, `services/ob_record.py`, `ob-coverage` |
+| Intraday vs overnight | Reports are printed per horizon, and `ob-backtest --horizon overnight` runs overnight setups alone. Evidence is read per horizon from the newest run covering it. | `backtest.py`, `services/order_blocks.py` |
+| Candle timing | Setups carry `available_at`, the end of the 1m bar that settled them. The engine raises `LookAheadError` if a higher-timeframe bar ends after its source bar. The backtest refuses fills before `available_at`. A gate fails decisions stamped earlier. Tests compare engine bars with an independent pandas resample. | `engine.py`, `types.py`, `backtest.py` |
+| Gap execution | A rejected exit (no opening book yet) is retried as a new attempt instead of blocking forever, and keeps its `gap` reason. Archived gap exits take the first executable bid at or after 09:15:00; with none, the trade is excluded rather than filled at the stop or last evening's book. Tests cover missing opening ticks, stale quotes, thin books and reconnects. | `journal/ob_db.py`, `services/order_blocks.py`, `backtest.py` |
+| Underlying vs options edge | **Gate A** covers the underlying: sample size, expectancy CI, beating B0/B2/B3/B4, grid, one-parameter fragility, year concentration, VIX regimes and score monotonicity. **Gate B** covers options: archived real-quote trades with a known lot, at least 70% quote coverage, and an option expectancy CI above zero after costs. A horizon is promoted only when both pass. | `backtest.gate_a/gate_b` |
+| Overnight stress engine | Reprices the exact structure at the next 09:15 across a gap-σ × IV grid plus named scenarios, including weekend decay and a widened opening spread. Reports expected P&L, expected loss, stress loss, worst cell and break-even move. The governor sizes overnight on the larger of this and the 1.5σ stress, and the card shows the scenario table. | `model/order_blocks/stress.py`, `execution/governor.py` |
+| Backtest methodology | Baselines are matched on holding period (forced exit), time of day (±30 min), stop width, reward multiple and overnight exposure. Overnight random arms pick other nights within ±10 sessions. B4 is a random time with the same direction. The last 20% of sessions is a sealed holdout; unsealing is logged and repeat views are flagged. There are breakdowns by direction, VIX tercile and expiry proximity, and a one-at-a-time sensitivity sweep. | `backtest.py`, `ob-backtest --holdout/--unseal-holdout/--sensitivity` |
+| Data quality hard gate | Bars, quotes, contracts and paper positions are checked (§ module docstring). A JSON report is written on every run. `ob-backtest` and `ob-paper` exit 3 on a CRITICAL failure unless `--allow-dirty`, and a dirty run never promotes. | `services/data_quality.py`, `ob-quality` |
+| Reconcile paper vs backtest | Replays the same days and matches live signals by id, reporting missed entries, live-only signals, plan differences, slippage against recorded quotes, exit agreement and ΔR. | `services/reconcile.py`, `ob-reconcile` |
+
+### 10.4 Daily runbook (IST, trading days)
 
 | Time | Command | Why |
 |---|---|---|
-| once | `model_cli.py ob-audit --out docs/ORDER_BLOCKS_DATA_AUDIT.md` | Phase-0 report; commit it |
+| once | `model_cli.py ob-audit --out docs/ORDER_BLOCKS_DATA_AUDIT.md --json audit.json` | Phase-0 report + data quality; commit the Markdown |
+| once | set `lot_size` in `config.py` to what `ob-audit` reports | sizing commands refuse to run until it matches |
 | once | `model_cli.py ob-backfill --days 1825 --options` | years of spot, ~1 cycle of FUT1, live option legs |
 | 08:00 | `model_cli.py kite-login` then `kite-master` | session + versioned master |
-| 09:10 | `model_cli.py ob-paper --event "…"` | records legs + runs the paper session until 15:30 |
+| 09:10 | `model_cli.py ob-paper --event "…"` | records legs + runs the paper session until 15:30 (refuses on CRITICAL data) |
 | (or) 09:10 | `model_cli.py ob-record` | record only, if not paper trading today |
 | 15:25 | `model_cli.py archive-chain --expiries 2` | existing EOD chain archive |
-| 16:00 | `model_cli.py ob-backfill --days 3` | fills any WS gaps from REST |
-| weekly | `model_cli.py ob-backtest --from … --to … [--grid]` | refreshes the verdict + calibration that `ob`/`ob-paper` read |
-| any | `model_cli.py ob` · `ob-journal` · `ob-settle ID PX` · `ob-kill [--off]` | scan · review · manual close · stop everything |
+| 16:00 | `model_cli.py ob-backfill --days 3 --options` | fills WS gaps from REST |
+| 16:10 | `model_cli.py ob-coverage --days 1` · `ob-reconcile --days 1` | did today's quotes land; does paper agree with the backtest |
+| weekly | `model_cli.py ob-backtest --horizon overnight --sensitivity` and `--horizon intraday --grid` | Gate A / Gate B per horizon on development sessions |
+| rarely | `model_cli.py ob-backtest --unseal-holdout` | final check; every viewing is logged |
+| any | `ob` · `ob-journal` · `ob-settle ID PX` · `ob-kill [--off]` · `ob-quality` | scan · review · manual close · stop everything · data gate |
 
+`scripts/ob-cron.example` has the same schedule as crontab lines.
 `ob-paper` already records everything `ob-record` does. Run one of them,
 not both: each opens its own WS connection (Kite allows 3 per API key, so
 `kite-live` alongside is fine), and two recorders would write duplicate
 quote rows for the same legs.
 
-### 10.4 What has NOT been verified
+### 10.5 What has NOT been verified
 
 - Nothing has run against a real Kite session: REST payload shapes,
   `full`-mode depth on options, and quote timestamps are taken from the
   existing parser and kiteconnect's documented shapes.
-- Cost rates, the freeze quantity and the NIFTY lot size must be checked
-  against current Zerodha/NSE sources (`ob-audit` prints the live lot).
+- Cost rates and the freeze quantity must be checked against current
+  Zerodha/NSE sources. The lot size is now enforced from the master.
 - The backtest has only run on synthetic random walks in tests. Its
-  numbers mean nothing until it runs on `ob-backfill` data.
+  numbers mean nothing until it runs on `ob-backfill` data, and Gate B
+  cannot pass until weeks of recorded quotes exist.
+- Exchange holidays are not modelled in the roll rule, the next-open
+  calculation or the expiry-proximity buckets.

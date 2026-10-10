@@ -35,6 +35,7 @@ with a session — see below).
 | `model_cli.py archive-chain [--expiries N]` | Persist tonight's option chain — **cron this at ~15:25 IST** |
 | `model_cli.py kite-login / kite-master / kite-parity / kite-live` | Kite session · instrument master · source parity · WS streaming |
 | `model_cli.py ob-audit / ob-backfill / ob-record` | Order-block data: availability report · REST minute archive · WS leg recorder |
+| `model_cli.py ob-quality / ob-coverage / ob-reconcile` | Order-block gates: data quality (exit 3 on CRITICAL) · option-quote coverage · live paper vs backtest |
 | `model_cli.py ob / ob-paper / ob-backtest / ob-journal / ob-settle / ob-kill` | Order-block system (paper only): scan · live paper session · backtest + verdict · review · manual close · kill switch — see `docs/ORDER_BLOCKS.md` §10 |
 | `main.py -oj` , `--settle-overnight ID PX` , `--settle-confluence ID PX` , `--settle-stock ID PX` | Journals + manual settlement |
 
