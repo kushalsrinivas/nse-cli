@@ -5,11 +5,19 @@ This is the as-built documentation for the platform specified in
 design rationale and the schemas; this file covers what exists, how to run
 it, what was measured, and what is still missing.
 
-**Paper only.** `execution.mode` accepts only `"paper"`, and no module under
-`market_platform/` can reach a broker. An AST test fails the build if any
-module imports `kiteconnect`, imports the Kite REST/auth modules from
-execution, risk, portfolio or options, or calls `place_order` /
-`modify_order`. Live trading would need a separate, deliberate project.
+**Paper only.** `execution.mode` accepts only `"paper"`. The boundary is the Kite
+client itself, not the SDK import (the SDK is needed for market data):
+`data/kite/readonly.py` wraps every `KiteConnect` the platform builds in
+`ReadOnlyKite`, which exposes only a whitelist of read methods (instruments,
+quote, ohlc, ltp, historical data, profile, margins, session setup). Every
+order, GTT, position-conversion, MF and token-revocation method raises
+`PaperOnlyError` before it reaches the SDK, and the wrapper cannot be
+unwrapped or reassigned. `tests/test_paper_boundary.py` checks that every SDK
+method is classified, that order calls never reach the client, that
+`KiteConnect(` is constructed only in `rest.py`/`auth.py`, and runs backfill,
+option pricing and the desk end to end against a spy client to show only
+whitelisted methods are called. Live trading would need a separate,
+deliberate project.
 
 > **The rule.** Every trade originates from a valid order-block setup.
 > Bullish and bearish pipelines share one documented core methodology and
@@ -145,7 +153,11 @@ A bearish **view** is always recorded. If no route is allowed, for example an ov
 
 **Status.** By score: `QUALIFIED` ≥ 75, `WATCH` ≥ 60, otherwise `REJECTED` (`SCORE_LOW`).
 
-**Clusters.** Signals with the same direction, in the same 15-minute window and the same correlation cluster (falling back to sector, then instrument) share a `cluster_id`. Only the first `max_signals_per_cluster` qualified signals keep that status; the rest become `SUPPRESSED:CLUSTER_CAP` and stay visible.
+**Clusters — deterministic allocation (time, then merit).** Signals with the same direction, in the same 15-minute window and the same correlation cluster (falling back to sector, then instrument) share a `cluster_id`, and at most `max_signals_per_cluster` keep `QUALIFIED`:
+- Earlier minutes win: a slot taken at 10:01 is not given back to a better signal at 10:07 (no look-ahead).
+- Within one minute, every candidate of that minute is ranked together by `(-score, -R:R, -ADV, instrument_key)`, never by arrival order. The pipeline collects the whole minute before allocating, and the desk waits for both directions' minute batches (a per-minute barrier) before deciding, in `(available_at, -score, -R:R, direction, instrument_key)` order.
+- Losers become `SUPPRESSED:CLUSTER_CAP` and stay visible; each signal stores `allocation` (`cluster_id`, rank this minute, candidates/kept this minute, slots taken before) in `score_json`.
+- Tests shuffle candidate order and inject random publish jitter into the live bus tasks; winners and desk decisions are identical to replay.
 
 ### 2.4 Risk and execution
 
@@ -196,6 +208,8 @@ A bearish **view** is always recorded. If no route is allowed, for example an ov
 - BSE indices are loaded from manual files in `conf/universe/constituents/` (see §6, limitations).
 - Membership is versioned (`valid_from` / `valid_to`), so the members on a given date can be queried.
 - Snapshots are content-addressed.
+- **Downloads are validated and fail closed (`universe/validate.py`).** A file is applied only if it passes: non-empty, member count within the catalogue's `expected_members`, ISIN check digits (ISO 6166), no duplicate symbol/ISIN, churn vs current membership ≤ 20% (broad) / 40% (other); and cross-index identities (NIFTY 50 ⊂ 100 ⊂ 200 ⊂ 500, NEXT 50 ⊂ 100, 50 ∩ NEXT 50 = ∅, 50 ∪ NEXT 50 = 100, MIDCAP 150 / SMALLCAP 250 ⊂ 500). Series other than EQ/BE and a symbol whose ISIN changed (symbol change / corporate action) are warnings. A rejected or missing file keeps the previous membership in force and is recorded in `index_refresh`.
+- **Readiness.** `run` refuses to start (exit 2) if any index was never validated, its latest refresh was rejected or missing, its last good list is older than `universe.max_membership_age_days` (7), or coverage < 99%. `universe.allow_stale = true` lets it start anyway, and the run is labelled `STALE_UNIVERSE`. `universe validate` prints the state.
 - Instruments are deduplicated by token.
 
 **Lots.** There is no lot table in the code; a grep test enforces this. Lots for any underlying come from the front future in the Kite master, as of the date: all NFO/BFO futures are now versioned in `kite_instrument_history`.
@@ -230,7 +244,8 @@ python platform_cli.py calendar import nse-holidays-2026.csv --exchange NSE   # 
 python platform_cli.py config check
 
 # universe (BSE: put conf/universe/constituents/bse_sensex.csv first — §6)
-python platform_cli.py universe refresh         # exit 1 if any index < 99% resolved or missing
+python platform_cli.py universe refresh         # exit 1 if any index rejected, missing or < 99% resolved
+python platform_cli.py universe validate        # readiness: what `run` would refuse and why
 python platform_cli.py universe coverage
 python platform_cli.py universe tree
 
@@ -254,6 +269,10 @@ python platform_cli.py kill [--release]         # paper kill switch (shared with
 # performance
 python platform_cli.py load-test --tokens 1500 --minutes 16 --mult 1,2,4
 ```
+
+**Report bases — underlying vs options are never mixed.** `backtest report` prints two labelled sections:
+- **UNDERLYING** (`research/underlying.py`): every signal the scorer QUALIFIED (its first status, before the governor) walked on the instrument's own 1m bars with the NIFTY simulator, costs in index points / equity bps. It measures whether the order-block signals predict the underlying, needs only candles, and drives **Gate A**.
+- **EXECUTED**, split by route basis: `equity (cash)`, `futures (modelled from underlying + costs)`, `options (archived real quotes)`. Option P&L exists only where an archived quote snapshot priced the trade. `options_coverage` reports priced / unevaluable; below 70% coverage or too few priced trades the options basis is printed as **NOT ASSESSABLE**, and Gate B is not claimed on it. History without archived option quotes therefore validates the underlying only.
 
 **Cron (IST) suggestion:**
 
@@ -287,34 +306,43 @@ The existing `scripts/ob-cron.example` NIFTY jobs keep working unchanged.
 
 ## 6. Test, load and recovery results
 
-`python -m unittest discover -s tests`: **573 tests, all passing; `ruff check .` is clean.**
+`python -m unittest discover -s tests`: **591 tests, all passing; `ruff check .` is clean.**
 
 | Suite | Tests | Covers |
 |---|---|---|
 | `test_platform_phase1` | 15 | config validation, migrations and checksums, writer batching/backpressure/isolation, legacy import, calendar, runs |
 | `test_platform_phase2` | 24 | catalogue, constituents, versioned membership and point-in-time queries, dedupe by token, eligibility, lots from the master (by date), no hardcoded lots, breadth shim, CLI |
 | `test_platform_phase3` | 19 | planner tiers/budget/eviction/diffs, bus policies, pool, candle completion, **replay equivalence bit for bit**, restart without duplicates, 1,500-instrument throughput, backfill watermarks, repair, quality gate |
-| `test_platform_phase4` | 22 | bounded core equals unbounded, flat memory, OB-origin enforcement (runtime and source), **NIFTY baseline equivalence**, determinism, direction rules, pipeline isolation, scoring, clustering, context, correlation, live bus routing |
+| `test_platform_phase4` | 25 | bounded core equals unbounded, flat memory, OB-origin enforcement (runtime and source), **NIFTY baseline equivalence**, determinism, direction rules, pipeline isolation, scoring, clustering, context, correlation, live bus routing, **cluster allocation independent of processing order (shuffle + live jitter = replay)** |
 | `test_platform_phase5` | 22 | costs, routes, governor checks/sizing/caps, options pricing (index and stock, deadline, process pool), chain providers, fills/gaps/exits/P&L, restart mid-trade, **concurrency (no double allocation)**, paper isolation (AST) |
-| `test_platform_phase6` | 9 | replay through the same modules, no look-ahead, unavailable option data → unevaluable, sealed holdout, gates, **nifty-ob-v1 reproduced exactly**, point-in-time membership, determinism, slippage sensitivity |
+| `test_platform_phase6` | 11 | replay through the same modules, no look-ahead, unavailable option data → unevaluable, sealed holdout, gates, **nifty-ob-v1 reproduced field by field (zones, setups, decisions, exits)**, a changed strategy is detected, underlying vs options bases, point-in-time membership, determinism, slippage sensitivity |
+| `test_paper_boundary` | 5 | every SDK method classified, order methods blocked before the client, only `rest.py`/`auth.py` construct `KiteConnect`, end-to-end backfill + option pricing + desk use only read methods |
+| `test_universe_validation` | 8 | ISIN check digit, count/duplicate/churn/symbol-ISIN checks, cross-index identities, truncated or inconsistent file rejected with the old list kept, missing/stale/allow_stale, runner refuses an unready universe |
 | `test_platform_phase7` | 8 | 12 sections, explanations, chart data, read-only connections, config validation, **5,000 signals < 300 ms**, health DEGRADED on a silent feed |
 | `test_platform_recovery` | 7 | WS drop → REST repair, DB locked and disk errors, **kill -9 mid-session → same later signals, no duplicate orders**, duplicate ticks and candles, missing candles, feed down → nothing approved |
 | `test_platform_phase8` | 3 | live paper runner end to end, load harness, daily reconciliation (0% mismatch) |
 
-**Load (measured, `load-test --tokens 1500 --minutes 16`, one core, synthetic ticks with depth through the real live path):**
+**Load (measured, `load-test --tokens 1500 --minutes 16 --warm-sessions 25`, one core, synthetic ticks with depth through the real live path).** Every instrument's structure state is first warmed with 25 sessions of 1m bars (14 M bars), so the rings are full and the numbers reflect steady state:
 
-| Load | Ticks | Ingest capacity | Headroom | Candle completion p99 | All-instrument structure + signals + risk p99 | Peak memory | Writer |
-|---|---|---|---|---|---|---|---|
-| 1× (1 tick/token/s) | 1.44 M | 33.5k ticks/s | 22× | 5.67 s | 0.45 s | 58 MB | 24k rows, 0 dropped, 0 backpressure |
-| 2× | 2.88 M | 33.3k ticks/s | 11× | 5.79 s | 0.45 s | 58 MB | same |
-| 4× | 5.76 M | 33.9k ticks/s | 5.6× | 5.64 s | 0.43 s | 58 MB | same |
+| Load | Ticks | Ingest capacity | Headroom | Candle completion p99 | All-instrument structure + signals + risk p99 | Process RSS after warm-up → end | Peak RSS | Writer |
+|---|---|---|---|---|---|---|---|---|
+| 1× (1 tick/token/s) | 1.44 M | 140k ticks/s | 94× | 5.06 s | 0.56 s | 794 → 828 MB | 828 MB | 24k rows, 0 dropped, 0 backpressure |
+| 4× | 5.76 M | 134k ticks/s | 22× | 5.07 s | 0.58 s | 794 → 826 MB | 826 MB | same |
 
 All §9.6 SLOs that the harness measures are met at 4× (targets: completion ≤ 7 s, structure ≤ 1 s, ≥ 2× tick rate).
+
+**Memory, three separate figures.**
+- *Process RSS / peak* (VmRSS / VmHWM from `/proc`): about 81 MB at start, **≈ 830 MB at 1,500 instruments** in steady state, flat across the timed session.
+- *Structure state per instrument*: **≈ 486 KB** (RSS delta of the warm-up ÷ instruments; 713 MB for 1,500). This is the bounded per-instrument engine state (1m/HTF rings, swings, zones) and the bulk of the process.
+- *Everything else* (bus, candles, scoring, desk, writer, interpreter): ≈ 115 MB.
+- The earlier "58 MB" was a tracemalloc figure for a session with **no warm-up**: the rings held only the 16 test minutes, so it measured a nearly empty engine, and tracemalloc counts Python allocations, not RSS. tracemalloc also slowed the hot path ~3× (the earlier 22× / 1.9 s figures); it is no longer used in the harness.
+
 The writer measured on its own does **108k rows/s** (90k bar rows in 0.83 s); one minute of 1,500 bars commits in about 10 ms.
-**Caveat:** inside the harness the writer's commit latency reads about 10 s, because the synthetic generator keeps the
-event loop and the GIL busy for the whole minute. A live socket spends most of its time waiting on network I/O, so this
-does not apply to real sessions. The soak test (memory flat over 6 h) and the dashboard p95 test with live writes still
-have to be run during the paper period. The memory figure covers the data and decision path (tracemalloc), not process RSS.
+**Caveat:** inside the harness the writer's commit latency reads 12–38 s, because the synthetic generator keeps the
+event loop and the GIL busy for the whole minute and the writer only gets scheduled between bursts (nothing was dropped and no
+backpressure occurred). A live socket spends most of its time waiting on network I/O, so this does not apply to real sessions,
+but it should be checked in the first paper sessions (`daily-check` health rows). The soak test (memory flat over 6 h) and the
+dashboard p95 test with live writes still have to be run during the paper period.
 
 ## 7. Limitations and open items (honest)
 
@@ -326,7 +354,7 @@ have to be run during the paper period. The memory figure covers the data and de
 
 **Data sources**
 - **BSE constituents** (SENSEX, BANKEX) need a manual CSV, because BSE has no stable file to fetch.
-- **niftyindices URLs** are taken from the published pattern, but the sandbox could not reach them; the first `universe refresh` on your machine is the real test. Any failure is reported, and the previous membership is kept.
+- **niftyindices URLs** are taken from the published pattern, but the sandbox could not reach them (403), so validation is tested on fixtures in the published layout with real ISINs. The first `universe refresh` on your machine is the real test; a failed, truncated or inconsistent file is rejected, the previous list stays in force, and `run` refuses to start until it is fixed or `allow_stale` is set.
 - **Corporate actions** are not fetched automatically: fill `corporate_actions` yourself. Daily bars are unadjusted, so jumps on split days are flagged unless the action is recorded.
 
 **Options and execution**
@@ -342,7 +370,7 @@ have to be run during the paper period. The memory figure covers the data and de
 **Engine and context**
 - **The first bar after a restart** has NULL volume until REST repairs it (two minutes later). HTF bars that include it carry the partial volume live; replays read the repaired value.
 - **Regime and alignment** are transparent heuristics, not fitted models. Correlation clusters need at least 20 sessions of daily bars.
-- **Memory:** about **0.45 MB per instrument**, flat once the rings fill, so about 225 MB for 500 instruments. This replaces the plan's 150 KB target; the old engine grew without bound (A5).
+- **Memory:** about **486 KB per instrument** of structure state, flat once the rings fill: ≈ 830 MB process RSS at 1,500 instruments (≈ 360 MB at 500). This is over 3× the plan's 150 KB target; the old engine grew without bound (A5). Shrinking it (e.g. compact bar arrays instead of per-bar objects) is open work; it is not needed for a machine with ≥ 2 GB free.
 - **Not enabled:** the plan's extra trigger types (breakout-retest, sweep-reclaim) and gap-down continuation. Each would be a new setup type, and under the rule it must be deliberately introduced and validated separately, not slipped in.
 
 **Operations**
@@ -355,9 +383,11 @@ have to be run during the paper period. The memory figure covers the data and de
    - `platform_cli.py init` imports the NIFTY system's archive.
    - Otherwise run `data backfill`.
 2. Run the platform: `backtest run --from A --to B`. It covers the whole universe, both directions and both horizons.
-3. Run `backtest compare-nifty RUN --from A --to B`. It reports:
-   - `identical_setups`: the platform's NIFTY signals equal the original engine's setups, zone for zone. **This must be true. If it is false, the platform changed the NIFTY strategy, and the command exits 1.**
-   - the baseline's per-horizon metrics (underlying R, matched baselines B0–B4 as before);
-   - the platform's results for all instruments and for NIFTY only;
-   - NIFTY buy-and-hold over the same sessions.
+3. Run `backtest compare-nifty RUN --from A --to B`. It replays the original engine on exactly the bars the platform used (NIFTY 50 spot + front-future volume, same timestamps) with the parameters taken from the run's own stored config, and compares field by field:
+   - `config`: parameter fingerprint of the run vs the baseline;
+   - `zones`: every zone's timeframe, direction, kind, source/BOS/eligible timestamps, bounds, ATR, displacement, RVOL, FVG, sweep, final status and close reason;
+   - `setups`: trigger time, `available_at`, horizon, entry, stop, target, HTF trend, core score and each component;
+   - `decisions`: the core eligibility decision and its rejection reason (`SCORE` / `RR`);
+   - `exits`: for every setup, entry/exit time and price, exit reason, R and gap R.
+   **`identical` must be true; otherwise the platform changed the NIFTY strategy, the differences are listed, and the command exits 1.** Not compared, by design and reported separately: the platform's extra filters (context, liquidity, clusters, governor) and therefore which trades get taken. Also printed: the baseline's own metrics, the platform's results for all instruments and NIFTY only, and NIFTY buy-and-hold.
 4. Judge expansion only on the development sessions, by the gates in `conf/promotion.toml`. The holdout stays sealed until a single, logged `--unseal`.

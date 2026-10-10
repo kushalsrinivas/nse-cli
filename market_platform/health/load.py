@@ -36,7 +36,6 @@ import asyncio
 import json
 import random
 import time
-import tracemalloc
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -155,7 +154,6 @@ async def run_load(cfg, dbs, *, tokens: int, minutes: int, ticks_per_sec: float,
     px = [1000.0 + rng.random() * 2000 for _ in range(tokens)]
     vol = [0] * tokens
     drift = [rng.choice((-1, 1)) * 0.0004 for _ in range(tokens)]
-    tracemalloc.start()
     ingest_s, ticks = 0.0, 0
     settle_ms, pipe_ms = [], []
     per_sec = max(1, int(round(ticks_per_sec)))
@@ -191,8 +189,6 @@ async def run_load(cfg, dbs, *, tokens: int, minutes: int, ticks_per_sec: float,
         settle_ms.append((b - a) * 1000)
         pipe_ms.append((c - b) * 1000)
     await dp.writer.flush()
-    cur, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -217,9 +213,7 @@ async def run_load(cfg, dbs, *, tokens: int, minutes: int, ticks_per_sec: float,
             if warm_sessions else None,
             "structure_state_per_instrument_kb": round(((mem_warm["rss"] or 0) - (mem_start["rss"] or 0))
                                                        * 1024 / tokens, 1) if warm_sessions else None,
-            "warm_sessions": warm_sessions, "warm_bars": warmed,
-            "traced_during_session_current": round(cur / 1e6, 1),
-            "traced_during_session_peak": round(peak / 1e6, 1)},
+            "warm_sessions": warm_sessions, "warm_bars": warmed},
         "slo": {
             # sustained capacity ÷ offered tick rate (must stay > 1 with margin)
             "ingest_headroom_x": round(ticks / ingest_s / (tokens * ticks_per_sec), 1)
