@@ -73,6 +73,10 @@ class DataConfig:
     repair_min_missing: int = 1
     #: Price jump (vs previous close) flagged as a quality event, percent.
     jump_alert_pct: float = 8.0
+    #: Sessions of stored bars replayed into the structure engine before a
+    #: live session starts (the 60m ring holds 20 sessions). Reconciliation
+    #: replays use the same warm-up so live and replay start from equal state.
+    warmup_sessions: int = 20
 
 
 @dataclass(frozen=True)
@@ -293,6 +297,7 @@ RANGES: dict[str, dict] = {
     "data.historical_rps": _rng(0.1, 3.0, "req/s"),
     "data.repair_min_missing": _rng(1, 375, "minutes"),
     "data.jump_alert_pct": _rng(1, 50, "%"),
+    "data.warmup_sessions": _rng(0, 120, "sessions"),
     "structure.pivot_k": _rng(1, 10),
     "structure.trigger_pivot_k": _rng(1, 10),
     "structure.atr_n": _rng(2, 100),

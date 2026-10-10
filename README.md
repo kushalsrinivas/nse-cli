@@ -15,8 +15,23 @@ python main.py --tonight               # one EOD verdict card (dry-run default)
 python main.py --tonight --verbose --journal   # full audit trail + record it
 ```
 
-Python ≥ 3.10. Market data needs network (yfinance/NSE by default; Kite
-with a session — see below).
+Python ≥ 3.10 (the multi-market platform needs ≥ 3.11 for `tomllib`). Market
+data needs network (yfinance/NSE by default; Kite with a session — see below).
+
+### Multi-market order-block platform (paper)
+
+`platform_cli.py` runs the order-block methodology across indices, sectors
+and stocks (NIFTY 50 … 500, sector indices, SENSEX), with separate bullish and
+bearish pipelines, a central risk governor, paper execution for cash/futures/
+options, replay research and a read-only web dashboard. Start with
+[`docs/PLATFORM.md`](docs/PLATFORM.md) (run instructions, results, limitations):
+
+```bash
+python platform_cli.py init && python platform_cli.py universe refresh
+python platform_cli.py backtest run --from 2025-10-01 --to 2026-09-30
+python platform_cli.py run          # live paper session
+python platform_cli.py dashboard    # http://127.0.0.1:8765
+```
 
 ## Daily workflow
 
@@ -91,7 +106,8 @@ fetchers is the degrade-don't-crash design.
 - `docs/STOCK_OVERNIGHT.md` — per-stock engine, lots, journal, caveats
 - `docs/KITE.md` — Kite service: commands, data audit, production rules
 - `docs/LAYA.md` — Laya veto filter: questions, policy, shadow mode, evaluation
-- `docs/PLATFORM_PLAN.md` — multi-market platform: repository audit, current/target architecture, schemas, concurrency, risk, phased plan (for review)
+- `docs/PLATFORM.md` — multi-market platform as built: architecture, methodology, run/configure/monitor, test/load/recovery results, limitations, baseline comparison
+- `docs/PLATFORM_PLAN.md` — the platform's audit, design rationale, schemas and phased plan
 - `docs/ORDER_BLOCKS.md` — order-block system (NIFTY options, paper-only): schemas, detection, scoring, backtest, risk, Kite wiring, runbook (§10)
 
 ## Known limitations (honest)

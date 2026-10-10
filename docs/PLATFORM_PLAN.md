@@ -1,6 +1,8 @@
 # Multi-market order-block platform — audit and implementation plan
 
-Status: **plan for review. No platform code has been written yet.**
+Status: **implemented (Phases 1–8; Phase 9 is the paper observation period you run).**
+The as-built documentation, run instructions, measured results and open items are in
+[`PLATFORM.md`](PLATFORM.md); deviations from this plan are listed there (§6–§7).
 Branch: `claude/dreamy-hypatia-em8x55` (on top of `feature/laya-filter`).
 Execution stays **paper-only**. This plan contains no live order path. Enabling one would need a separate, deliberate project.
 

@@ -49,13 +49,13 @@ def record_config(app_conn, cfg, note: str = "") -> str:
 
 
 def start_run(app_conn, market_conn, cfg, *, kind: str, universe_snapshot: str = "none",
-              notes: str = "") -> str:
+              notes: str = "", strategy: str | None = None) -> str:
     record_config(app_conn, cfg)
     run_id = f"{kind}-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
     app_conn.execute(
         "INSERT INTO runs (run_id, kind, config_hash, strategy_version, universe_snapshot, "
         "data_version, started_at, status, notes) VALUES (?,?,?,?,?,?,?,?,?)",
-        (run_id, kind, cfg.hash, strategy_version(), universe_snapshot,
+        (run_id, kind, cfg.hash, strategy or strategy_version(), universe_snapshot,
          data_version(market_conn), datetime.now().isoformat(timespec="seconds"), "running", notes))
     app_conn.commit()
     return run_id

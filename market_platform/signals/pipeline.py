@@ -170,6 +170,19 @@ class SignalLayer:
         #: keys fed only as volume sources (not analysed as instruments)
         self.proxy_only: set[str] = set()
 
+    def warm(self, bars: dict) -> int:
+        """Feed one minute of historical bars to the structure engine only:
+        events are discarded, nothing is stored or traded. Used before a live
+        session so the engine starts with the state a continuous run would have."""
+        bars = join_index_volume(bars, self.volume_proxy)
+        n = 0
+        for key in sorted(bars):
+            if key in self.proxy_only:
+                continue
+            self.structure.on_bar(key, bars[key], self.volume_proxy.get(key))
+            n += 1
+        return n
+
     def set_volume_proxy(self, proxy: dict[str, str]) -> None:
         self.volume_proxy = dict(proxy)
         self.proxy_only = {f for f in proxy.values() if f not in self.instruments}

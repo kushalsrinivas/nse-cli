@@ -114,6 +114,7 @@ class Replay:
         app, market = self.dbs.app, self.dbs.market
         rid = run_id or start_run(app, market, self.cfg, kind="backtest",
                                   universe_snapshot=self.universe_snapshot,
+                                  strategy=self.strategy_version,
                                   notes=spec.label or f"{spec.frm}..{spec.to} "
                                                       f"{'+'.join(spec.directions)} "
                                                       f"{'+'.join(spec.horizons)}")
@@ -210,3 +211,38 @@ def membership_from_db(app_conn, index_ids: list[str], instrument_by_isin: dict[
 
 
 __all__ = ["Replay", "ReplaySpec", "ReplayResult", "membership_from_db"]
+
+
+def warm_layer(layer, market_conn, instruments: dict[str, dict], before: date, sessions: int,
+               until: datetime | None = None) -> dict:
+    """Run the last `sessions` stored sessions before `before` through
+    `layer.warm` (structure state only); with `until`, also today's stored
+    bars that started before it (restart mid-session). Returns counts."""
+    keys = sorted(instruments)
+    if (sessions <= 0 and until is None) or not keys:
+        return {"sessions": 0, "bars": 0}
+    days = [r[0] for r in market_conn.execute(
+        f"SELECT DISTINCT substr(ts,1,10) d FROM bars_1m WHERE ts<? AND instrument_key IN "
+        f"({', '.join('?' * len(keys))}) ORDER BY d DESC LIMIT ?",
+        (f"{before.isoformat()} 00:00", *keys, max(sessions, 0)))][::-1]
+    if until is not None:
+        days.append(until.date().isoformat())
+    idx_under = {k: i["deriv_underlying"] for k, i in instruments.items()
+                 if i.get("kind") == "index" and i.get("deriv_underlying")}
+    n = 0
+    for day in days:
+        proxy = front_future_keys(future_keys(market_conn, day, set(idx_under.values())), idx_under)
+        layer.set_volume_proxy(proxy)
+        minute: dict = {}
+        cur = None
+        for key, bar in day_bars(market_conn, keys + sorted(set(proxy.values())), day):
+            if until is not None and bar.ts >= until.replace(tzinfo=None):
+                break
+            if cur is not None and bar.ts != cur:
+                n += layer.warm(minute)
+                minute = {}
+            cur = bar.ts
+            minute[key] = bar
+        if minute:
+            n += layer.warm(minute)
+    return {"sessions": len(days), "bars": n, "from": days[0] if days else None}
