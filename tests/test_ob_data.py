@@ -279,8 +279,14 @@ class TestAudit(unittest.TestCase):
                 return {"NSE:NIFTY 50": {"last_price": 25000.0}}
 
         db = _db()
-        rep = run_audit(days=5, rest=Rest(), store=store, archive=MarketArchive(db),
-                        chain_archive=ChainArchive(Path(db)))
+        from dataclasses import replace
+        from unittest import mock
+
+        import services.ob_audit
+        with mock.patch.object(services.ob_audit, "SETTINGS",
+                               replace(services.ob_audit.SETTINGS, lot_size=75)):
+            rep = run_audit(days=5, rest=Rest(), store=store, archive=MarketArchive(db),
+                            chain_archive=ChainArchive(Path(db)))
         lot = rep.get("lot_size")
         self.assertEqual(lot.verdict, "FAIL")           # config 75 vs master 65
         self.assertIn("65", lot.value)

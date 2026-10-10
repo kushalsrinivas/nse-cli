@@ -10,6 +10,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from config import SETTINGS
 from data.options import ChainRow, OptionChain, OptionLeg
 from journal.confluence_db import ConfluenceJournal, ConfluenceRunRecord
 from journal.confluence_perf import compute_confluence_performance
@@ -269,14 +270,14 @@ class TestLotsAndTraded(unittest.TestCase):
     def test_settle_defaults_to_one_lot(self):
         rid = self._row_id()
         settled = self.cj.settle(rid, 120.0)
-        self.assertEqual(settled.hypothetical_pnl, 20.0 * 75)
+        self.assertEqual(settled.hypothetical_pnl, 20.0 * SETTINGS.lot_size)
         self.assertEqual(settled.outcome, "WIN")
 
     def test_settle_respects_lots(self):
         rid = self._row_id()
         self.cj.mark_traded(rid, 3)
         settled = self.cj.settle(rid, 120.0)
-        self.assertEqual(settled.actual_pnl, 20.0 * 3 * 75)
+        self.assertEqual(settled.actual_pnl, 20.0 * 3 * SETTINGS.lot_size)
         self.assertTrue(settled.is_actual_trade)
 
     def test_mark_traded_validation(self):

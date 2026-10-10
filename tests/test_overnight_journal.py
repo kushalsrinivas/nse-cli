@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import datetime
 
+from config import SETTINGS
 from journal.overnight_db import OvernightJournal, OvernightRunRecord
 from journal.overnight_perf import compute_overnight_performance
 
@@ -78,9 +79,9 @@ class TestOvernightJournal(unittest.TestCase):
             created_at=datetime.now().isoformat(),
         )
         saved_go = self.oj.add(rec_go)
-        # Settle GO with exit = 135.0 (Gain of +35 * 75 = +₹2,625)
+        # Settle GO with exit = 135.0 (gain of +35 points per unit, one lot)
         settled_go = self.oj.settle(saved_go.id, 135.0, is_actual=True)
-        self.assertEqual(settled_go.actual_pnl, 2625.0)
+        self.assertEqual(settled_go.actual_pnl, 35.0 * SETTINGS.lot_size)
         self.assertEqual(settled_go.outcome, "WIN")
         self.assertEqual(settled_go.is_actual_trade, 1)
 
@@ -105,9 +106,9 @@ class TestOvernightJournal(unittest.TestCase):
             created_at=datetime.now().isoformat(),
         )
         saved_nogo = self.oj.add(rec_nogo)
-        # Settle NO-GO with exit = 90.0 (Loss of -30 * 75 = -₹2,250)
+        # Settle NO-GO with exit = 90.0 (loss of -30 points per unit, one lot)
         settled_nogo = self.oj.settle(saved_nogo.id, 90.0, is_actual=False)
-        self.assertEqual(settled_nogo.hypothetical_pnl, -2250.0)
+        self.assertEqual(settled_nogo.hypothetical_pnl, -30.0 * SETTINGS.lot_size)
         self.assertEqual(settled_nogo.outcome, "LOSS")
         self.assertEqual(settled_nogo.is_actual_trade, 0)
 
@@ -117,9 +118,9 @@ class TestOvernightJournal(unittest.TestCase):
         self.assertEqual(perf.go_count, 1)
         self.assertEqual(perf.nogo_count, 1)
         self.assertEqual(perf.go_wins, 1)
-        self.assertEqual(perf.go_net_pnl, 2625.0)
+        self.assertEqual(perf.go_net_pnl, 35.0 * SETTINGS.lot_size)
         self.assertEqual(perf.avoided_losses_count, 1)
-        self.assertEqual(perf.avoided_losses_rupees, 2250.0)
+        self.assertEqual(perf.avoided_losses_rupees, 30.0 * SETTINGS.lot_size)
         self.assertEqual(perf.filter_efficiency_pct, 100.0)
 
 

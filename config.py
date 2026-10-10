@@ -90,7 +90,7 @@ class Settings:
 
     # --- Risk / position sizing ---
     account_equity: float = 500_000.0     # ₹
-    lot_size: int = 75                    # NIFTY contract lot size
+    lot_size: int = 65                    # NIFTY contract lot size (NSE revision; the master guard checks it)
     risk_normal: float = 0.005            # 0.5% account risk per normal setup
     risk_high: float = 0.0075             # 0.75% for high-quality setups
     risk_exceptional: float = 0.010       # 1.0% hard ceiling, ever

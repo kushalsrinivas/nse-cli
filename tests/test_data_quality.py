@@ -127,7 +127,12 @@ class TestContractsAndPositions(unittest.TestCase):
                  "name": "NIFTY", "expiry": "2030-12-31", "strike": 25000, "lot_size": 75,
                  "instrument_type": "CE"}]
         st.upsert([normalize_dump_row(r, today) for r in rows])
-        rep = _run(_archive(), store=st)
+        from dataclasses import replace
+        from unittest import mock
+
+        import data.lots
+        with mock.patch.object(data.lots, "SETTINGS", replace(data.lots.SETTINGS, lot_size=75)):
+            rep = _run(_archive(), store=st)
         self.assertFalse(_status(rep, "contracts.lot_consistency").passed)
         self.assertFalse(_status(rep, "contracts.config_lot").passed)     # config 75 vs master 65
         self.assertFalse(rep.ok)

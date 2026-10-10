@@ -801,7 +801,7 @@ table, and the baseline deltas with CIs.
 
 ### 7.1 Before anything ships: `config.lot_size`
 
-`Settings.lot_size = 75`. NSE revised NIFTY's lot size during 2025–26,
+`Settings.lot_size = 65` (was 75 until NSE revised NIFTY's lot size in 2025–26),
 and the master carries the current value per contract. The OB system
 **must take lot size from the contract's master row** (via
 `kite_instrument_history` for the trade date) and never from config. The

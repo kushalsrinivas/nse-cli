@@ -427,7 +427,8 @@ class TestUniverseCli(unittest.TestCase):
             self.assertEqual(platform_cli.main(["--config", str(cfgp), "universe", "show"]), 0)
             self.assertEqual(platform_cli.main(["--config", str(cfgp), "universe", "members",
                                                 "NSE:NIFTY 50", "--on", "2026-10-06"]), 0)
-        self.assertIn("2 members", buf.getvalue())
+        import re
+        self.assertIn("2 members", re.sub(r"\x1b\[[0-9;]*m", "", buf.getvalue()))   # FORCE_COLOR-safe
 
 
 if __name__ == "__main__":

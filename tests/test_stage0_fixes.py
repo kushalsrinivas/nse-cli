@@ -302,7 +302,9 @@ class TestOvernightIsDryRunByDefault(unittest.TestCase):
         import model_cli
         captured = {}
         original = model_cli.cmd_overnight
+        original_guard = model_cli._lot_guard
         model_cli.cmd_overnight = lambda args: captured.setdefault("args", args) and 0
+        model_cli._lot_guard = lambda cmd: ""      # parser test: independent of the local master
         orig_argv = sys.argv
         sys.argv = ["model_cli.py", "overnight", *extra]
         try:
@@ -310,6 +312,7 @@ class TestOvernightIsDryRunByDefault(unittest.TestCase):
         finally:
             sys.argv = orig_argv
             model_cli.cmd_overnight = original
+            model_cli._lot_guard = original_guard
         return captured["args"]
 
     def test_journal_flag_defaults_off(self):
