@@ -137,6 +137,42 @@ def cmd_ob_quality(args) -> int:
     return rep.exit_code
 
 
+def cmd_ob_reconcile(args) -> int:
+    from datetime import date, timedelta
+
+    from services.reconcile import reconcile
+
+    to = args.to or date.today().isoformat()
+    frm = args.frm or (date.fromisoformat(to) - timedelta(days=args.days)).isoformat()
+    rep = reconcile(frm=frm, to=to)
+    s = rep.summary()
+    console.print(f"[bold]Live paper vs backtest[/] {frm} → {to}")
+    for k, v in s.items():
+        console.print(f"  {k:<28} {v}")
+    if rep.pairs:
+        t = Table(title="Matched signals")
+        for col in ("Trigger", "Hz", "Live", "Plan", "Score L/BT", "Entry slip", "Exit slip",
+                    "Exit L/BT", "R L/BT", "Notes"):
+            t.add_column(col, overflow="fold")
+        for p in rep.pairs:
+            t.add_row(p.trigger_ts[5:16], p.horizon[:5], p.live_decision,
+                      "[green]same[/]" if p.plan_match else "[red]differs[/]",
+                      f"{p.score_live:.0f}/{p.score_bt:.0f}",
+                      "—" if p.entry_slippage_pts is None else f"{p.entry_slippage_pts:+.2f}",
+                      "—" if p.exit_slippage_pts is None else f"{p.exit_slippage_pts:+.2f}",
+                      f"{p.live_exit_reason or '—'}/{p.bt_exit_reason or '—'}",
+                      f"{p.live_r if p.live_r is not None else '—'}/{p.bt_r if p.bt_r is not None else '—'}",
+                      "; ".join(p.notes))
+        console.print(t)
+    for m in rep.missed[:20]:
+        console.print(f"[yellow]missed by live[/] {m['trigger_ts']} {m['horizon']} score {m['score']:.0f}"
+                      + ("" if m["eligible"] else " (not eligible anyway)"))
+    for m in rep.live_only[:20]:
+        console.print(f"[red]live only[/] {m['trigger_ts']} {m['horizon']} {m['decision']} "
+                      "— live saw a setup the stored bars do not produce (data drift?)")
+    return 1 if (args.strict and not rep.clean) else 0
+
+
 def cmd_ob_coverage(args) -> int:
     from data.kite.archive import MarketArchive
     from journal.ob_db import ObJournal
@@ -189,6 +225,12 @@ def register(sub) -> dict:
                     help="quote snapshot interval in seconds (default 60)")
     rc.add_argument("--verbose", action="store_true")
 
+    rc2 = sub.add_parser("ob-reconcile", help="live paper vs backtest on the same days")
+    rc2.add_argument("--days", type=int, default=10)
+    rc2.add_argument("--from", dest="frm", default=None)
+    rc2.add_argument("--to", default=None)
+    rc2.add_argument("--strict", action="store_true", help="exit 1 on any mismatch")
+
     q = sub.add_parser("ob-quality", help="data-quality gate (JSON report; exit 3 on CRITICAL)")
     q.add_argument("--scope", default="audit", choices=("audit", "backtest", "paper"))
     q.add_argument("--days", type=int, default=30)
@@ -202,6 +244,7 @@ def register(sub) -> dict:
     cmds = {
         "ob-coverage": cmd_ob_coverage,
         "ob-quality": cmd_ob_quality,
+        "ob-reconcile": cmd_ob_reconcile,
         "ob-audit": cmd_ob_audit,
         "ob-backfill": cmd_ob_backfill,
         "ob-record": cmd_ob_record,

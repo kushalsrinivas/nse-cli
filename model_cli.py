@@ -1345,7 +1345,7 @@ def cmd_research(args) -> int:
 LOT_SIZED_COMMANDS = {
     "evaluate", "backtest", "optimize", "overnight", "tonight", "premarket",
     "confluence", "laya", "ob", "ob-paper", "ob-backtest", "ob-settle",
-    "overnight-journal", "oj", "confluence-journal", "cj", "journal",
+    "overnight-journal", "oj", "confluence-journal", "cj", "journal", "ob-reconcile",
 }
 
 
