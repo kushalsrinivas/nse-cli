@@ -134,14 +134,30 @@ class TestReplay(unittest.TestCase):
         self.assertIn("holdout viewed", notes)
 
     def test_nifty_baseline_reproduced_exactly(self):
+        """Field-level regression vs the original engine on identical bars and config."""
         from market_platform.research.baseline import compare
         cfg, d = market_with_bars()
-        from model.order_blocks.params import ObParams
-        out = compare(d.app, d.market, self.res.run_id, FRM, TO,
-                      params=replace(ObParams(), rvol_min=1.0), cfg=cfg)
-        self.assertTrue(out["identical_setups"], (out["only_in_baseline"][:3], out["only_in_platform"][:3]))
-        self.assertGreater(out["baseline"]["setups"], 0)
-        self.assertIn("platform_all", out)
+        out = compare(d.app, d.market, self.res.run_id, FRM, TO, cfg=cfg)
+        detail = {k: out[k] for k in ("config", "zones", "setups", "decisions", "exits")}
+        self.assertTrue(out["identical"], detail)
+        self.assertTrue(out["config"]["same"])
+        self.assertGreater(out["zones"]["baseline"], 0)
+        self.assertEqual(out["zones"]["baseline"], out["zones"]["platform"])
+        self.assertGreater(out["setups"]["baseline"], 0)
+        self.assertGreater(out["exits"]["compared"], 0)
+        self.assertEqual(out["exits"]["differences"], 0)
+        self.assertEqual(out["bars"]["with_future_volume"], out["bars"]["count"])
+
+    def test_regression_detects_a_changed_strategy(self):
+        from dataclasses import replace
+
+        from market_platform.research.baseline import compare, run_config_params
+        cfg, d = market_with_bars()
+        changed = replace(run_config_params(d.app, self.res.run_id), disp_body_atr=1.3)
+        out = compare(d.app, d.market, self.res.run_id, FRM, TO, params=changed, cfg=cfg)
+        self.assertFalse(out["identical"])
+        self.assertFalse(out["config"]["same"])
+        self.assertGreater(out["zones"]["differences"] + out["setups"]["differences"], 0)
 
 
 class TestUnderlyingVsOptions(unittest.TestCase):

@@ -192,7 +192,7 @@ class TestOrderBlockOrigin(unittest.TestCase):
         run_layer(layer(store=SignalStore(app)))
         n = app.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
         orphans = app.execute("SELECT COUNT(*) FROM signals s LEFT JOIN zones z "
-                              "ON z.zone_id=s.zone_id WHERE z.zone_id IS NULL").fetchone()[0]
+                              "ON z.zone_id=s.zone_id AND z.run_id=s.run_id WHERE z.zone_id IS NULL").fetchone()[0]
         self.assertGreater(n, 0)
         self.assertEqual(orphans, 0)
 

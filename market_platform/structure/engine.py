@@ -163,7 +163,7 @@ ZONE_UPSERT = (
     "INSERT INTO zones (zone_id, instrument_key, timeframe, direction, kind, source_bar_ts, "
     "bos_bar_ts, first_eligible_ts, zone_low, zone_high, features_json, status, status_ts, "
     "close_reason, params_hash, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-    "ON CONFLICT (zone_id) DO UPDATE SET status=excluded.status, status_ts=excluded.status_ts, "
+    "ON CONFLICT (run_id, zone_id) DO UPDATE SET status=excluded.status, status_ts=excluded.status_ts, "
     "close_reason=excluded.close_reason, features_json=excluded.features_json")
 
 

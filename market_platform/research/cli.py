@@ -92,7 +92,7 @@ def cmd_backtest(args) -> int:
                       date.fromisoformat(args.to), cfg=cfg)
         console.print_json(data=json.loads(json.dumps(out, default=str)))
         d.close()
-        return 0 if out["identical_setups"] else 1
+        return 0 if out["identical"] else 1
     if args.action == "sensitivity":
         cfg, d, store, svc, inst, meta, cal, root = _setup(args)
         rows = []

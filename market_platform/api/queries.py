@@ -147,7 +147,8 @@ def signal_detail(app, run_id: str, signal_id: str) -> dict | None:
         dd.pop("limits_json", None)
         dd["explanation"] = explain(dd["reason_codes"])
         d["risk_decision"] = dd
-    z = app.execute("SELECT * FROM zones WHERE zone_id=?", (d["zone_id"],)).fetchone()
+    z = app.execute("SELECT * FROM zones WHERE run_id=? AND zone_id=?",
+                    (run_id, d["zone_id"])).fetchone()
     d["zone"] = dict(z) if z else None
     d["history"] = [dict(h) for h in app.execute(
         "SELECT ts, status, reason FROM signal_status_history WHERE signal_id=? AND run_id IN (?, '') "
@@ -259,8 +260,8 @@ def instrument_detail(app, market, key: str, *, tf: str = "15m", sessions: int =
                        (snapshot or "", key)).fetchone()
     zones = [dict(z) for z in app.execute(
         "SELECT zone_id, timeframe, direction, kind, zone_low, zone_high, status, bos_bar_ts, "
-        "first_eligible_ts, status_ts, close_reason FROM zones WHERE instrument_key=? "
-        "ORDER BY bos_bar_ts DESC LIMIT 50", (key,))]
+        "first_eligible_ts, status_ts, close_reason FROM zones WHERE instrument_key=? AND run_id=? "
+        "ORDER BY bos_bar_ts DESC LIMIT 50", (key, run_id or ""))]
     sigs = signals(app, run_id=run_id, q=key, size=50)["items"]
     sigs = [s for s in sigs if s["instrument_key"] == key]
     mins = {"1m": 1, "5m": 5, "15m": 15, "60m": 60}[tf] if tf in ("1m", "5m", "15m", "60m") else 15
