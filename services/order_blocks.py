@@ -390,8 +390,7 @@ def scan(*, days: int = 30, journal: ObJournal | None = None, record: bool = Fal
 
     ltp = (rest.ltp(["NSE:NIFTY 50"]).get("NSE:NIFTY 50") or {}).get("last_price")
     res.spot = float(ltp) if ltp else bars[-1][0].close
-    vix = get_india_vix()
-    res.vix = float(vix) if vix else None
+    res.vix = vix_level(get_india_vix())
     if res.vix is None:
         res.notices.append("India VIX unavailable — option EV not evaluated")
         return res
@@ -802,13 +801,13 @@ def run_paper(*, minutes: float = 375, events: list[str] | None = None, laya=Non
                 if recorder.pin(spec):
                     add.append(spec.token)
 
-    vix_state = {"v": float(get_india_vix() or 14.0), "at": now}
+    vix_state = {"v": vix_level(get_india_vix()) or 14.0, "at": now}
 
     def vix():
         if (datetime.now() - vix_state["at"]).total_seconds() > 300:
-            v = get_india_vix()
+            v = vix_level(get_india_vix())
             if v:
-                vix_state["v"], vix_state["at"] = float(v), datetime.now()
+                vix_state["v"], vix_state["at"] = v, datetime.now()
         return vix_state["v"]
 
     ws_state = {"state": "idle", "since": datetime.now()}
@@ -906,8 +905,41 @@ class BacktestOutcome:
     notices: list[str] = field(default_factory=list)
 
 
-def vix_history(days: int) -> dict[str, float]:
-    """India VIX daily closes by date (Yahoo ^INDIAVIX). {} on failure."""
+def vix_level(value) -> float | None:
+    """`get_india_vix()` returns (level, day-change-%); take the level."""
+    if isinstance(value, tuple):
+        value = value[0] if value else None
+    try:
+        return float(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def vix_history(days: int, rest=None, store=None) -> dict[str, float]:
+    """India VIX daily closes by date. Kite first (NSE:INDIA VIX day candles);
+    Yahoo ^INDIAVIX only when there is no Kite session. {} on failure."""
+    try:
+        from data.kite.backfill import to_ist_minute
+        from data.kite.rest import KiteRest
+        from data.source import ensure_master
+        rest = rest or KiteRest()
+        store = store or ensure_master(rest)
+        row = store.find("NSE", "INDIA VIX")
+        if row is None:
+            raise ValueError("INDIA VIX missing from master")
+        out: dict[str, float] = {}
+        to = datetime.now()
+        frm = to - timedelta(days=days + 10)
+        while frm < to:                      # day candles: ≤2000 days per request
+            end = min(frm + timedelta(days=1900), to)
+            for r in rest.historical(row.instrument_token, "day", frm, end) or []:
+                if r.get("close"):
+                    out[to_ist_minute(r["date"])[:10]] = float(r["close"])
+            frm = end + timedelta(days=1)
+        if out:
+            return out
+    except Exception as exc:
+        log.info("kite VIX history unavailable (%s); trying Yahoo", exc)
     try:
         from data.nifty import fetch_history
         period = "5y" if days > 730 else ("2y" if days > 365 else "1y")

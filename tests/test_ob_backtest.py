@@ -327,3 +327,30 @@ class TestBacktestService(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVixHelpers(unittest.TestCase):
+    def test_vix_level_unpacks_tuple(self):
+        from services.order_blocks import vix_level
+        self.assertEqual(vix_level((13.4, -1.2)), 13.4)
+        self.assertIsNone(vix_level((None, None)))
+        self.assertEqual(vix_level(12.0), 12.0)
+        self.assertIsNone(vix_level(None))
+
+    def test_vix_history_prefers_kite(self):
+        from data.kite.store import InstrumentStore, normalize_dump_row
+        from services.order_blocks import vix_history
+        store = InstrumentStore(os.path.join(tempfile.mkdtemp(), "s.db"))
+        store.upsert([normalize_dump_row({"instrument_token": 264969, "exchange": "NSE",
+                                          "tradingsymbol": "INDIA VIX", "name": "INDIA VIX",
+                                          "instrument_type": "EQ", "segment": "INDICES"},
+                                         "2026-10-09")])
+
+        class Rest:
+            def historical(self, token, interval, frm, to, oi=False):
+                assert (token, interval) == (264969, "day")
+                return [{"date": datetime(2026, 10, 8), "close": 12.5},
+                        {"date": datetime(2026, 10, 9), "close": 13.1}]
+
+        got = vix_history(30, rest=Rest(), store=store)
+        self.assertEqual(got["2026-10-09"], 13.1)
