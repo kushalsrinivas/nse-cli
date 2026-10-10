@@ -138,7 +138,8 @@ class PaperExecutor:
         if not dec.approved:
             return None
         if cand.signal_id in self.portfolio.positions or self.app.execute(
-                "SELECT 1 FROM positions WHERE signal_id=?", (cand.signal_id,)).fetchone():
+                "SELECT 1 FROM positions WHERE run_id=? AND signal_id=?",
+                (self.run_id, cand.signal_id)).fetchone():
             self.counters["duplicates_avoided"] += 1
             return self.portfolio.positions.get(cand.signal_id)
         route = dec.route
@@ -200,10 +201,11 @@ class PaperExecutor:
              pos.structure, json.dumps(pos.legs, default=str), pos.quantity, pos.lot_size,
              pos.entry_net, pos.u_entry, pos.u_stop, pos.u_target, pos.risk_rupees,
              now.isoformat(), "OPEN", pos.entry_charges))
-        self.app.execute("UPDATE signals SET status='EXECUTED' WHERE signal_id=?", (cand.signal_id,))
-        self.app.execute("INSERT INTO signal_status_history (signal_id, ts, status, reason) "
-                         "VALUES (?,?,?,?)", (cand.signal_id, now.isoformat(), "EXECUTED",
-                                              f"{pos.structure} x{pos.quantity}"))
+        self.app.execute("UPDATE signals SET status='EXECUTED' WHERE run_id=? AND signal_id=?",
+                         (self.run_id, cand.signal_id))
+        self.app.execute("INSERT INTO signal_status_history (run_id, signal_id, ts, status, reason) "
+                         "VALUES (?,?,?,?,?)", (self.run_id, cand.signal_id, now.isoformat(),
+                                                "EXECUTED", f"{pos.structure} x{pos.quantity}"))
         self.app.commit()
         zone_key = f"{cand.underlying}|{cand.direction}|{cand.zone_id}"
         self.portfolio.open(pos, zone_key)
@@ -309,10 +311,10 @@ class PaperExecutor:
         self.app.execute(
             "UPDATE positions SET status='CLOSED', closed_at=?, exit_net=?, exit_reason=?, "
             "gross_pnl=?, charges=?, net_pnl=?, r_multiple=?, mae_rupees=?, mfe_rupees=?, gap_pnl=? "
-            "WHERE signal_id=?",
+            "WHERE run_id=? AND signal_id=?",
             (now.isoformat(), pos.exit_net, reason, pos.gross_pnl, pos.charges, pos.net_pnl,
              round(r_mult, 3) if r_mult is not None else None, pos.mae_rupees, pos.mfe_rupees,
-             pos.gap_pnl, pos.signal_id))
+             pos.gap_pnl, self.run_id, pos.signal_id))
         self.app.commit()
         self.portfolio.close(pos.signal_id)
         self.counters["exits"] += 1

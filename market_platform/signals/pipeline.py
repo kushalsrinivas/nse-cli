@@ -20,6 +20,7 @@ import json
 import logging
 from datetime import datetime
 
+from market_platform.candles.volume import join_index_volume
 from market_platform.scoring.score import Clusterer, Scorer
 from market_platform.signals.bearish import BearishRules
 from market_platform.signals.bullish import BullishRules
@@ -135,9 +136,10 @@ class SignalStore:
             f"VALUES ({', '.join('?' * len(SIGNAL_COLUMNS))})", [row[c] for c in SIGNAL_COLUMNS])
         if cur.rowcount:
             reason = (cand.reject_reasons or cand.qualify_reasons or [""])[0]
-            self.app.execute("INSERT INTO signal_status_history (signal_id, ts, status, reason) "
-                             "VALUES (?,?,?,?)", (cand.signal_id, cand.available_at.isoformat(),
-                                                  cand.status, reason))
+            self.app.execute("INSERT INTO signal_status_history (run_id, signal_id, ts, status, "
+                             "reason) VALUES (?,?,?,?,?)", (run_id, cand.signal_id,
+                                                            cand.available_at.isoformat(),
+                                                            cand.status, reason))
         return bool(cur.rowcount)
 
     def commit(self) -> None:
@@ -163,12 +165,25 @@ class SignalLayer:
         self.quarantined = quarantined or set()
         self.spreads = spreads                 # callable key -> median spread bps, or None
         self.errors: list[dict] = []
+        #: index key → proxy future key (volume source); set per session
+        self.volume_proxy: dict[str, str] = {}
+        #: keys fed only as volume sources (not analysed as instruments)
+        self.proxy_only: set[str] = set()
+
+    def set_volume_proxy(self, proxy: dict[str, str]) -> None:
+        self.volume_proxy = dict(proxy)
+        self.proxy_only = {f for f in proxy.values() if f not in self.instruments}
 
     # -- sync path (replay, tests, and inside the live tasks) -------------------------------
 
     def on_bars(self, bars: dict) -> list[SignalCandidate]:
+        """All instruments' bars of one minute. Index bars get their proxy
+        future's volume (candles/volume.py) before the core sees them."""
+        bars = join_index_volume(bars, self.volume_proxy)
         out: list[SignalCandidate] = []
         for key in sorted(bars):
+            if key in self.proxy_only:
+                continue
             out.extend(self.on_bar(key, bars[key]))
         return out
 
@@ -176,7 +191,7 @@ class SignalLayer:
         if self.context is not None:
             self.context.on_bar(key, bar)
         out = []
-        for ev in self.structure.on_bar(key, bar):
+        for ev in self.structure.on_bar(key, bar, self.volume_proxy.get(key)):
             cand = self.handle(ev)
             if cand is not None:
                 out.append(cand)
@@ -221,16 +236,28 @@ class SignalLayer:
 
         async def structure_task():
             while True:
-                ev = await candles.get()
-                if self.context is not None:
-                    self.context.on_bar(ev.instrument_key, ev.bar)
-                for sev in self.structure.on_bar(ev.instrument_key, ev.bar):
-                    if self.store is not None:
-                        self.store.save_zone(sev, self.run_id)
-                    if sev.kind == "setup":
-                        await bus.publish(f"structure.{sev.direction}", sev)
-                    else:
-                        await bus.publish("structure.zones", sev)
+                # The candle service publishes a whole settled batch at once:
+                # drain it and process minute by minute, instruments sorted, so
+                # live and replay see identical input order (and index bars can
+                # be joined with their proxy future's volume).
+                batch = [await candles.get(), *candles.drain()]
+                by_ts: dict = {}
+                for ev in batch:
+                    by_ts.setdefault(ev.bar.ts, {})[ev.instrument_key] = ev.bar
+                for ts in sorted(by_ts):
+                    bars = join_index_volume(by_ts[ts], self.volume_proxy)
+                    for key in sorted(bars):
+                        if key in self.proxy_only:
+                            continue
+                        if self.context is not None:
+                            self.context.on_bar(key, bars[key])
+                        for sev in self.structure.on_bar(key, bars[key], self.volume_proxy.get(key)):
+                            if self.store is not None:
+                                self.store.save_zone(sev, self.run_id)
+                            if sev.kind == "setup":
+                                await bus.publish(f"structure.{sev.direction}", sev)
+                            else:
+                                await bus.publish("structure.zones", sev)
                 if self.store is not None:
                     self.store.commit()
 

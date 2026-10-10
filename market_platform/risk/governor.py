@@ -257,6 +257,7 @@ class CentralGovernor:
 
 
 def persist(app_conn, dec: RiskDecision, *, run_id: str, now: datetime) -> bool:
+    dec.decision_id = "D" + short_hash(run_id, dec.signal_id, "decision")[:15]
     route = dec.route
     cur = app_conn.execute(
         "INSERT OR IGNORE INTO risk_decisions (decision_id, signal_id, run_id, ts, approved, "
@@ -272,16 +273,18 @@ def persist(app_conn, dec: RiskDecision, *, run_id: str, now: datetime) -> bool:
          json.dumps(dec.exposure_before, default=str), json.dumps(dec.limits, default=str)))
     status = "APPROVED" if dec.approved else "REJECTED"
     app_conn.execute("UPDATE signals SET status=?, reject_reasons=CASE WHEN ?=0 THEN ? ELSE "
-                     "reject_reasons END WHERE signal_id=? AND status IN ('QUALIFIED','NOT_EXECUTABLE')",
+                     "reject_reasons END WHERE run_id=? AND signal_id=? AND status IN "
+                     "('QUALIFIED','NOT_EXECUTABLE')",
                      (status, int(dec.approved),
-                      json.dumps([f"RISK:{x}" for x in dec.reasons]), dec.signal_id))
-    app_conn.execute("INSERT INTO signal_status_history (signal_id, ts, status, reason) "
-                     "VALUES (?,?,?,?)", (dec.signal_id, now.isoformat(timespec="seconds"), status,
-                                          dec.primary))
+                      json.dumps([f"RISK:{x}" for x in dec.reasons]), run_id, dec.signal_id))
+    app_conn.execute("INSERT INTO signal_status_history (run_id, signal_id, ts, status, reason) "
+                     "VALUES (?,?,?,?,?)", (run_id, dec.signal_id, now.isoformat(timespec="seconds"),
+                                            status, dec.primary))
     app_conn.commit()
     return bool(cur.rowcount)
 
 
-def existing(app_conn, signal_id: str) -> dict | None:
-    row = app_conn.execute("SELECT * FROM risk_decisions WHERE signal_id=?", (signal_id,)).fetchone()
+def existing(app_conn, signal_id: str, run_id: str) -> dict | None:
+    row = app_conn.execute("SELECT * FROM risk_decisions WHERE run_id=? AND signal_id=?",
+                           (run_id, signal_id)).fetchone()
     return dict(row) if row else None

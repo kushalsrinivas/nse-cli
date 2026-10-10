@@ -1,0 +1,28 @@
+# Pre-registered promotion criteria (versioned with the repository).
+# Change this file only in its own commit, BEFORE looking at the results it
+# would judge. Every backtest report quotes the thresholds it applied.
+#
+# A pipeline (bullish / bearish) × horizon (intraday / overnight) may move from
+# research to paper only when Gate A and Gate B pass on development data
+# (the sealed holdout is not used to decide), and from paper to anything else
+# only after the shadow period below — and live trading is out of scope for
+# this project entirely.
+
+[gate_a]
+# minimum closed trades on development sessions
+min_trades = { intraday = 100, overnight = 40 }
+# walk-forward: chronological folds over development sessions
+folds = 5
+min_positive_folds = 0.6
+# one calendar year may not carry more than this share of total R
+max_year_share = 0.6
+
+[gate_b]
+# round-trip costs may not exceed this share of gross profit
+max_cost_share = 0.5
+
+[shadow]
+# paper sessions with live data (Phase 9) before a promoted pipeline is trusted
+min_sessions = 20
+# live paper vs replay of the same sessions must agree (ob-reconcile style)
+max_unexplained_signal_mismatch = 0.05

@@ -101,12 +101,13 @@ class StructureEngine:
                                              horizons=self.horizons, max_bars=self.ring)
         return e
 
-    def on_bar(self, key: str, bar: Bar) -> list[StructureEvent]:
-        """Feed one settled 1m bar of one instrument."""
+    def on_bar(self, key: str, bar: Bar, contract: str | None = None) -> list[StructureEvent]:
+        """Feed one settled 1m bar of one instrument. `contract` names the
+        volume source (the proxy future for an index) for same-contract rvol."""
         if key in self.quarantined:
             return []
         try:
-            evs = self.engine(key).on_minute(bar, key)
+            evs = self.engine(key).on_minute(bar, contract or key)
         except Exception as exc:                      # isolate the instrument
             self.counters["errors"] += 1
             n = self.errors[key] = self.errors.get(key, 0) + 1

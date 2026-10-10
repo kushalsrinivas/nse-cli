@@ -69,7 +69,7 @@ class TradingDesk:
         self.portfolio.note_signal()
         if cand.status != "QUALIFIED":
             return None
-        if existing(self.app, cand.signal_id):
+        if existing(self.app, cand.signal_id, self.run_id):
             return None                                  # restart: already decided
         route, why = self._route(cand, now)
         pricing = None
@@ -81,7 +81,7 @@ class TradingDesk:
         now = now or datetime.now()
         async with self._lock:
             self.portfolio.note_signal()
-            if cand.status != "QUALIFIED" or existing(self.app, cand.signal_id):
+            if cand.status != "QUALIFIED" or existing(self.app, cand.signal_id, self.run_id):
                 return None
             route, why = self._route(cand, now)
             pricing = None

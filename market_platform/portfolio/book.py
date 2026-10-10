@@ -203,7 +203,7 @@ class Portfolio:
         """Reload OPEN positions of this run (restart mid-trade)."""
         n = 0
         for r in app_conn.execute("SELECT p.*, s.zone_id FROM positions p LEFT JOIN signals s "
-                                  "ON s.signal_id=p.signal_id WHERE p.run_id=? AND p.status='OPEN'",
+                                  "ON s.signal_id=p.signal_id AND s.run_id=p.run_id WHERE p.run_id=? AND p.status='OPEN'",
                                   (self.run_id,)):
             pos = Position(
                 position_id=r["position_id"], signal_id=r["signal_id"],
