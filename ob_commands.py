@@ -255,14 +255,16 @@ def cmd_ob_backtest(args) -> int:
     frm = args.frm or (date.fromisoformat(to) - timedelta(days=365)).isoformat()
     out = run_backtest(frm=frm, to=to, params=ObParams(), cost_points=args.cost_points,
                        with_grid=args.grid, options=not args.no_options,
-                       persist_trades=not args.no_persist)
+                       persist_trades=not args.no_persist, horizon=args.horizon,
+                       holdout_frac=args.holdout, unseal_holdout=args.unseal_holdout,
+                       with_sensitivity=args.sensitivity)
     for n in out.notices:
         console.print(f"[yellow]{n}[/]")
     if not out.summary:
         return 1
     console.print(f"[bold]{out.run_id}[/] {frm} → {to} · {out.summary.get('sessions')} sessions "
                   f"· {out.summary.get('setups')} setups · params {out.summary.get('params_hash')}")
-    for panel in backtest_panels(out.summary):
+    for panel in backtest_panels(out.summary, None if args.horizon == "both" else args.horizon):
         console.print(panel)
     if out.grid_rows:
         pos = sum(1 for r in out.grid_rows if r["n"] and r["expectancy_r"] > 0)
@@ -324,6 +326,14 @@ def _register_trading(sub) -> dict:
     bt.add_argument("--no-options", action="store_true", help="skip the option layer")
     bt.add_argument("--no-persist", action="store_true", help="do not write trades to the journal")
     bt.add_argument("--json", default=None, help="write the summary JSON here")
+    bt.add_argument("--horizon", default="both", choices=("both", "intraday", "overnight"),
+                    help="evaluate one horizon on its own (default both, reported separately)")
+    bt.add_argument("--holdout", type=float, default=0.2,
+                    help="final fraction of sessions kept sealed (default 0.2; 0 disables)")
+    bt.add_argument("--unseal-holdout", action="store_true",
+                    help="report the sealed holdout (logged; repeated views are flagged)")
+    bt.add_argument("--sensitivity", action="store_true",
+                    help="one-at-a-time parameter sensitivity on development sessions")
 
     k = sub.add_parser("ob-kill", help="engage / release the paper-trading kill switch")
     k.add_argument("--off", action="store_true")

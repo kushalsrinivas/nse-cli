@@ -65,21 +65,34 @@ class Evidence:
 
 
 def load_evidence(journal: ObJournal) -> Evidence:
-    runs = journal.runs(limit=1)
+    """Promotion and calibration from the newest backtest covering each horizon.
+
+    A horizon is promoted only when both gates passed: Gate A (the
+    underlying signal beats its baselines) and Gate B (real-quote option
+    trades are profitable after costs).
+    """
+    runs = journal.runs(limit=50)
     if not runs:
         return Evidence()
-    run = runs[0]
-    try:
-        summary = json.loads(run["summary_json"])
-    except ValueError:
-        return Evidence(run["run_id"], note="latest run summary unreadable")
-    ev = Evidence(run["run_id"], note=f"evidence from backtest {run['run_id']}")
-    for h in ("intraday", "overnight"):
-        v = (summary.get("horizons", {}).get(h, {}) or {}).get("verdict", {})
-        ev.promoted[h] = bool(v.get("promoted"))
-    cal = summary.get("calibration") or {}
-    if cal.get("status") == "ok" and (cal.get("brier_skill") or 0) > 0:
-        ev.steps = cal.get("steps")
+    ev = Evidence(runs[0]["run_id"], note=f"evidence from backtest {runs[0]['run_id']}")
+    found: set[str] = set()
+    for run in runs:
+        try:
+            summary = json.loads(run["summary_json"])
+        except ValueError:
+            continue
+        hz = summary.get("horizons", {}) or {}
+        for h in summary.get("horizons_run", ["intraday", "overnight"]):
+            if h in found or h not in hz:
+                continue
+            block = hz[h] or {}
+            ev.promoted[h] = bool(block.get("promoted", (block.get("verdict") or {}).get("promoted")))
+            found.add(h)
+        cal = summary.get("calibration") or {}
+        if ev.steps is None and cal.get("status") == "ok" and (cal.get("brier_skill") or 0) > 0:
+            ev.steps = cal.get("steps")
+        if found >= {"intraday", "overnight"}:
+            break
     return ev
 
 
@@ -993,13 +1006,23 @@ def run_backtest(*, frm: str, to: str, params: ObParams | None = None,
                  cost_points: float | None = None, with_grid: bool = False,
                  options: bool = True, persist_trades: bool = True,
                  archive=None, store=None, journal: ObJournal | None = None,
-                 vix_by_date: dict[str, float] | None = None) -> BacktestOutcome:
+                 vix_by_date: dict[str, float] | None = None, horizon: str = "both",
+                 holdout_frac: float = 0.2, unseal_holdout: bool = False,
+                 with_sensitivity: bool = False) -> BacktestOutcome:
+    """Chronological backtest with a sealed final holdout.
+
+    Gates, grid, sensitivity and calibration see only the development
+    sessions. `unseal_holdout` reports the holdout and logs the viewing:
+    a holdout that has been looked at before is no longer untouched, and
+    the report says how many times it has been.
+    """
     from data.kite.archive import MarketArchive
     from model.order_blocks import backtest as bt
 
     params = params or ObParams()
     archive = archive or MarketArchive()
     journal = journal or ObJournal()
+    horizons = ("intraday", "overnight") if horizon == "both" else (horizon,)
     out = BacktestOutcome(run_id="BT-" + datetime.now().strftime("%Y%m%d-%H%M%S"), summary={})
     bars = load_bars(archive, f"{frm} 00:00", f"{to} 23:59")
     if not bars:
@@ -1008,42 +1031,49 @@ def run_backtest(*, frm: str, to: str, params: ObParams | None = None,
     if not any(b.volume for b, _ in bars):
         out.notices.append("no FUT1 volume in range — volume score reads N/A throughout")
     cp = bt.DEFAULT_COST_POINTS if cost_points is None else cost_points
-    res = bt.run(bars, params, cost_points=cp)
+    res = bt.run(bars, params, cost_points=cp, horizons=horizons)
+    dev, hold = bt.split_holdout(res, holdout_frac)
+    if hold is None and holdout_frac > 0:
+        out.notices.append("too few sessions for a holdout — every session is development")
 
     grid_frac = None
-    if with_grid:
-        grid_frac, out.grid_rows = bt.run_grid(bars, params, cost_points=cp)
+    if with_grid and "intraday" in horizons:
+        grid_frac, out.grid_rows = bt.run_grid(bars, params, cost_points=cp,
+                                               sessions=dev.sessions)
+    sensitivity = None
+    if with_sensitivity:
+        sensitivity = {h: bt.run_sensitivity(bars, params, horizon=h, sessions=dev.sessions,
+                                             cost_points=cp) for h in horizons}
+
+    vix = vix_by_date if vix_by_date is not None else vix_history(
+        (datetime.fromisoformat(to) - datetime.fromisoformat(frm)).days)
+    if store is None:
+        try:
+            from data.kite.store import InstrumentStore
+            store = InstrumentStore()
+        except Exception:
+            store = None
+    expiries = symbol_for = lot_for = None
+    if store:
+        from data.kite import instruments as ki
+        from data.lots import contract_lot, nifty_lot
+        expiries = ki.option_expiries(store, "NIFTY", include_expired=True)
+
+        def symbol_for(expiry, strike, otype):
+            for r in ki.option_legs(store, "NIFTY", expiry, otype):
+                if r.strike == strike:
+                    return r.tradingsymbol
+            return None
+
+        def lot_for(day, symbol=None, _store=store):
+            # As of the trade date only: a lot from today's master would
+            # silently re-size history across an NSE lot revision.
+            res_ = contract_lot(symbol, day, store=_store) if symbol else nifty_lot(day, store=_store)
+            return res_.lot if res_.source == "history" else None
 
     opt = None
     layer_name = "none"
     if options:
-        vix = vix_by_date if vix_by_date is not None else vix_history(
-            (datetime.fromisoformat(to) - datetime.fromisoformat(frm)).days)
-        symbol_for = expiries = None
-        if store is None:
-            try:
-                from data.kite.store import InstrumentStore
-                store = InstrumentStore()
-            except Exception:
-                store = None
-        if store:
-            from data.kite import instruments as ki
-            expiries = ki.option_expiries(store, "NIFTY", include_expired=True)
-
-            def symbol_for(expiry, strike, otype):
-                for r in ki.option_legs(store, "NIFTY", expiry, otype):
-                    if r.strike == strike:
-                        return r.tradingsymbol
-                return None
-        lot_for = None
-        if store:
-            from data.lots import contract_lot, nifty_lot
-
-            def lot_for(day, symbol=None, _store=store):
-                # As of the trade date only: a lot from today's master would
-                # silently re-size history across an NSE lot revision.
-                res = contract_lot(symbol, day, store=_store) if symbol else nifty_lot(day, store=_store)
-                return res.lot if res.source == "history" else None
         cfg = bt.OptionLayerConfig(lot_for=lot_for)
         opt = bt.option_layer(res.trades, vix_by_date=vix or None,
                               archive=archive if symbol_for else None,
@@ -1051,16 +1081,37 @@ def run_backtest(*, frm: str, to: str, params: ObParams | None = None,
                               sessions=res.sessions)
         layer_name = "archived" if (opt.get("archived") or {}).get("n") else (
             "synthetic" if opt.get("synthetic") else "none")
-        if not vix:
-            out.notices.append("no VIX history — synthetic option layer skipped")
+    if not vix:
+        out.notices.append("no VIX history — synthetic option layer and VIX regimes skipped")
 
-    calibration = bt.walk_forward_calibration(res.baselines.get("B2", []))
-    out.summary = bt.summarize(res, grid_frac=grid_frac, options=opt, calibration=calibration)
+    note = ""
+    shown = None
+    if hold is not None:
+        prior = journal.holdout_views(params.fingerprint(), hold.sessions[0], hold.sessions[-1])
+        if unseal_holdout:
+            journal.log_holdout_view(out.run_id, params.fingerprint(), hold.sessions[0],
+                                     hold.sessions[-1])
+            shown = hold
+            note = (f"holdout {hold.sessions[0]} → {hold.sessions[-1]} UNSEALED "
+                    f"(viewing #{len(prior) + 1} for these parameters)")
+            if prior:
+                note += " — it has been seen before and is no longer an untouched test"
+        else:
+            note = (f"holdout {hold.sessions[0]} → {hold.sessions[-1]} sealed "
+                    f"({len(hold.sessions)} sessions; previously viewed {len(prior)}x)")
+
+    calibration = bt.walk_forward_calibration(dev.baselines.get("B2", []))
+    out.summary = bt.summarize(dev, grid_frac=grid_frac, options=opt, calibration=calibration,
+                               sensitivity=sensitivity, vix_by_date=vix, expiries=expiries,
+                               holdout=shown, holdout_note=note)
+    out.summary["horizons_run"] = list(horizons)
     out.summary["cost_points"] = cp
     out.summary["range"] = [frm, to]
+    out.grid_rows = out.grid_rows or []
     bt.persist(journal, res, out.summary, run_id=out.run_id, option_layer_name=layer_name,
-               fold_spec={"unit": "session", "block": bt.BLOCK, "calibration": "monthly folds, "
-                          "5-session embargo"}, trades=persist_trades)
+               fold_spec={"unit": "session", "block": bt.BLOCK, "holdout_frac": holdout_frac,
+                          "calibration": "monthly folds, 5-session embargo, dev only"},
+               trades=persist_trades)
     return out
 
 

@@ -169,6 +169,15 @@ CREATE TABLE IF NOT EXISTS ob_events (
 );
 CREATE INDEX IF NOT EXISTS idx_obe_run ON ob_events(run_id, seq);
 
+CREATE TABLE IF NOT EXISTS ob_holdout_views (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    holdout_from TEXT NOT NULL,
+    holdout_to TEXT NOT NULL,
+    viewed_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ob_backtest_runs (
     run_id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -557,6 +566,18 @@ class ObJournal:
              json.dumps(fold_spec, default=str), option_layer,
              json.dumps(summary, default=str)))
         self.conn.commit()
+
+    def log_holdout_view(self, run_id: str, params_hash: str, frm: str, to: str) -> None:
+        self.conn.execute(
+            "INSERT INTO ob_holdout_views (run_id, params_hash, holdout_from, holdout_to, "
+            "viewed_at) VALUES (?,?,?,?,?)", (run_id, params_hash, frm, to, _now()))
+        self.conn.commit()
+
+    def holdout_views(self, params_hash: str, frm: str, to: str) -> list[dict]:
+        """Earlier unsealings of a holdout that overlaps [frm, to] for these params."""
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM ob_holdout_views WHERE params_hash=? AND holdout_from<=? "
+            "AND holdout_to>=? ORDER BY seq", (params_hash, to, frm))]
 
     def runs(self, limit: int = 20) -> list[dict]:
         return [dict(r) for r in self.conn.execute(

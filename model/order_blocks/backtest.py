@@ -93,6 +93,9 @@ class Trade:
     zone_id: str = ""
     htf_trend: str = "none"
     available_at: datetime | None = None
+    #: Baselines only: forced exit time so a baseline trade is held exactly as
+    #: long as the strategy trade it is matched to.
+    max_exit_ts: datetime | None = None
     exit_ts: datetime | None = None
     exit: float | None = None
     reason: str = ""
@@ -178,6 +181,9 @@ def simulate(trade: Trade, book: _Book, cost_points: float) -> Trade | None:
         if sig is not None:
             trade.exit, trade.exit_ts, trade.reason = sig.u_price, sig.ts, sig.reason
             break
+        if trade.max_exit_ts is not None and j > i and b.end >= trade.max_exit_ts:
+            trade.exit, trade.exit_ts, trade.reason = b.close, b.end, "matched_hold"
+            break
         prev_close = b.close
         if trade.horizon == "intraday" and j + 1 < len(bars) and bars[j + 1].ts.date() != opened_on:
             trade.exit, trade.exit_ts, trade.reason = b.close, b.end, "eod"
@@ -230,6 +236,28 @@ class RunResult:
     def by_horizon(self, horizon: str, arm: str = "OB") -> list[Trade]:
         src = self.trades if arm == "OB" else self.baselines.get(arm, [])
         return [t for t in src if t.horizon == horizon]
+
+    def subset(self, sessions: list[str]) -> RunResult:
+        """The same run restricted to `sessions` (e.g. development vs holdout)."""
+        keep = set(sessions)
+        return RunResult(
+            self.params, [t for t in self.trades if t.session in keep],
+            [s for s in self.setups if s.trigger_ts.date().isoformat() in keep],
+            {k: [t for t in v if t.session in keep] for k, v in self.baselines.items()},
+            self.engine_counters, self.rejections, sorted(keep & set(self.sessions)))
+
+
+def split_holdout(res: RunResult, frac: float) -> tuple[RunResult, RunResult | None]:
+    """Chronological split: the last `frac` of sessions is the sealed holdout.
+
+    Everything that chooses or judges (gates, grid, sensitivity, calibration)
+    sees only the development part. The holdout is reported only on request,
+    and every viewing is logged by the caller.
+    """
+    if frac <= 0 or len(res.sessions) < 10:
+        return res, None
+    cut = int(len(res.sessions) * (1 - frac))
+    return res.subset(res.sessions[:cut]), res.subset(res.sessions[cut:])
 
 
 def run_engine(bars: list[tuple[Bar, str]], params: ObParams,
@@ -289,51 +317,89 @@ def _session_windows(bars: list[tuple[Bar, str]]) -> dict[str, list[datetime]]:
     return out
 
 
+#: Random intraday baseline entries are drawn within this distance of the
+#: matched strategy entry's time of day, inside the trigger window.
+TOD_MATCH = timedelta(minutes=30)
+#: Overnight random baselines draw from sessions within this many sessions
+#: of the strategy trade, so the market regime stays comparable.
+OVERNIGHT_NEIGHBOURS = 10
+
+
 def build_baselines(ob: list[Trade], setups: list[Setup], bars, book: _Book,
                     params: ObParams, cost_points: float, caps: Caps,
                     seed: int = 7) -> dict[str, list[Trade]]:
+    """Session-aware baselines, each matched to one strategy trade on:
+
+    - holding period: forced `matched_hold` exit after the same duration
+      (stops and targets still apply first, as for the strategy)
+    - time of entry: same session; random arms draw within ±30 min of the
+      strategy's time of day (intraday) or use the same 15:20 fill (overnight)
+    - overnight exposure: overnight trades are only matched by overnight trades
+    - stop width and reward multiple: identical, so only the entry logic differs
+
+    B0 random time, random direction · B1 same time, always long ·
+    B2 every setup, no score/gates · B3 same time, 60m trend direction ·
+    B4 random time, SAME direction (tests the timing, holding direction fixed)
+    """
     rng = random.Random(seed)
     windows = _session_windows(bars)
     htf_at = {s.trigger_ts: s.htf_trend for s in setups}
 
-    def clone(t: Trade, arm: str, direction: str, trigger: datetime) -> Trade:
+    def clone(t: Trade, arm: str, direction: str, trigger: datetime) -> Trade | None:
         r = t.risk_points
+        if r <= 0 or t.exit_ts is None:
+            return None
         sign = 1 if direction == BULLISH else -1
-        entry_ts = t.entry_ts if trigger == t.trigger_ts else trigger
+        entry_ts = trigger + (t.entry_ts - t.trigger_ts)       # same fill delay
         idx = book.first_after(entry_ts)
         if idx is None:
             return None
         ref = book.bars[idx].open
-        return Trade(arm, t.horizon, direction, trigger.date().isoformat(), trigger,
-                     entry_ts, ref, ref - sign * r, ref + sign * r * t.target_r,
-                     t.score, "", htf_at.get(trigger, "none"))
+        c = Trade(arm, t.horizon, direction, trigger.date().isoformat(), trigger,
+                  entry_ts, ref, ref - sign * r, ref + sign * r * t.target_r,
+                  t.score, "", htf_at.get(trigger, "none"))
+        c.max_exit_ts = entry_ts + (t.exit_ts - t.entry_ts)
+        return c
+
+    sessions = sorted(windows)
+
+    def random_time(t: Trade) -> datetime | None:
+        if t.horizon != "intraday":
+            # Overnight entries are always decided at 15:15, so the timing
+            # question is WHICH night. Draw the 15:15 decision of a random
+            # nearby session (±OVERNIGHT_NEIGHBOURS) other than this one.
+            try:
+                k = sessions.index(t.session)
+            except ValueError:
+                return None
+            pool = [d for d in sessions[max(0, k - OVERNIGHT_NEIGHBOURS):k + OVERNIGHT_NEIGHBOURS + 1]
+                    if d != t.session]
+            if not pool:
+                return None
+            d = rng.choice(pool)
+            return datetime.combine(date.fromisoformat(d), t.trigger_ts.time())
+        lo, hi = t.trigger_ts - TOD_MATCH, t.trigger_ts + TOD_MATCH
+        ts = [x + timedelta(minutes=1) for x in windows.get(t.session, [])
+              if lo <= x + timedelta(minutes=1) <= hi
+              and params.trigger_start <= (x + timedelta(minutes=1)).time() <= params.trigger_end]
+        return rng.choice(ts) if ts else None
+
+    def sim(cands) -> list[Trade]:
+        return [x for x in (simulate(c, book, cost_points) for c in cands if c) if x]
 
     out: dict[str, list[Trade]] = {}
-    b0 = []
+    b0, b4 = [], []
     for t in ob:
-        if t.horizon == "intraday":
-            ts = [x for x in windows.get(t.session, [])
-                  if params.trigger_start <= (x + timedelta(minutes=1)).time() <= params.trigger_end]
-            if not ts:
-                continue
-            trig = rng.choice(ts) + timedelta(minutes=1)
-        else:
-            trig = t.trigger_ts
-        c = clone(t, "B0", rng.choice((BULLISH, "bearish")), trig)
-        if c:
-            b0.append(c)
-    out["B0"] = [x for x in (simulate(c, book, cost_points) for c in b0) if x]
-    out["B1"] = [x for x in (simulate(c, book, cost_points) for c in
-                             filter(None, (clone(t, "B1", BULLISH, t.trigger_ts) for t in ob)))
-                 if x]
-    b3 = []
-    for t in ob:
-        trend = t.htf_trend
-        if trend in ("up", "down"):
-            c = clone(t, "B3", BULLISH if trend == "up" else "bearish", t.trigger_ts)
-            if c:
-                b3.append(c)
-    out["B3"] = [x for x in (simulate(c, book, cost_points) for c in b3) if x]
+        trig = random_time(t)
+        if trig is None:
+            continue
+        b0.append(clone(t, "B0", rng.choice((BULLISH, "bearish")), trig))
+        b4.append(clone(t, "B4", t.direction, random_time(t) or trig))
+    out["B0"] = sim(b0)
+    out["B4"] = sim(b4)
+    out["B1"] = sim(clone(t, "B1", BULLISH, t.trigger_ts) for t in ob)
+    out["B3"] = sim(clone(t, "B3", BULLISH if t.htf_trend == "up" else "bearish", t.trigger_ts)
+                    for t in ob if t.htf_trend in ("up", "down"))
     all_setups = [_trade_from_setup(s, "B2") for s in setups if s.plan.u_rr > 0]
     out["B2"] = apply_caps(all_setups, book, cost_points, caps)
     return out
@@ -462,20 +528,36 @@ class Verdict:
     horizon: str
     promoted: bool
     checks: list[tuple[str, bool, str]]
+    gate: str = "A+B"
+
+    @property
+    def passed(self) -> bool:
+        return all(p for _, p, _ in self.checks)
 
     def to_dict(self) -> dict:
-        return {"horizon": self.horizon, "promoted": self.promoted,
+        return {"horizon": self.horizon, "gate": self.gate, "promoted": self.promoted,
+                "passed": self.passed,
                 "checks": [{"name": n, "pass": p, "detail": d} for n, p, d in self.checks]}
 
 
-def verdict(res: RunResult, horizon: str, grid_positive_frac: float | None = None) -> Verdict:
+#: Gate B minimums: archived (real-quote) option trades per horizon.
+MIN_OPTION_TRADES = {"intraday": 100, "overnight": 40}
+MIN_OPTION_COVERAGE = 0.70
+
+
+def gate_a(res: RunResult, horizon: str, grid_positive_frac: float | None = None,
+           sensitivity: dict | None = None, breakdown: dict | None = None) -> Verdict:
+    """Gate A — does the order-block signal predict NIFTY better than baselines?
+
+    Underlying only, development sessions only, after costs in R.
+    """
     ob = res.by_horizon(horizon)
     checks: list[tuple[str, bool, str]] = []
     n_min = MIN_TRADES[horizon]
     point, lo, hi = expectancy_ci(ob, res.sessions)
     checks.append(("sample size", len(ob) >= n_min, f"{len(ob)} OOS trades (need {n_min})"))
     checks.append(("expectancy CI > 0", bool(lo > 0), f"{point:+.3f}R [{lo:+.3f}, {hi:+.3f}]"))
-    for arm in ("B0", "B2", "B3"):
+    for arm in ("B0", "B2", "B3", "B4"):
         d, dlo, dhi = paired_delta(ob, res.by_horizon(horizon, arm), res.sessions)
         checks.append((f"beats {arm}", bool(dlo > 0), f"Δ {d:+.4f}R/session [{dlo:+.4f}, {dhi:+.4f}]"))
     if grid_positive_frac is None:
@@ -483,25 +565,174 @@ def verdict(res: RunResult, horizon: str, grid_positive_frac: float | None = Non
     else:
         checks.append(("grid robustness ≥70%", grid_positive_frac >= 0.70,
                        f"{grid_positive_frac:.0%} of configs positive"))
+    if sensitivity is None:
+        checks.append(("not fragile to one parameter", False, "sensitivity not run (--sensitivity)"))
+    else:
+        frag = sensitivity.get("fragile", [])
+        checks.append(("not fragile to one parameter", not frag,
+                       "sign flips at: " + ", ".join(frag) if frag else "no neighbour flips sign"))
     m = metrics(ob, res.sessions)
     share = m.get("max_year_share")
     checks.append(("no year > 50% of R", share is not None and share <= 0.5,
-                   f"max year share {share}"))
+                   f"max year share {share}" if share is not None else "total R ≤ 0"))
+    vix = (breakdown or {}).get("vix_regime") or {}
+    if vix:
+        pos = sum(1 for v in vix.values() if v.get("n") and v.get("mean_r", 0) > 0)
+        checks.append(("positive in ≥2 of 3 VIX regimes", pos >= 2,
+                       ", ".join(f"{k} {v.get('mean_r')}" for k, v in vix.items())))
+    else:
+        checks.append(("positive in ≥2 of 3 VIX regimes", False, "no VIX history"))
     # Bands need every score, so they are read off B2 (all setups, no gate).
     bands = metrics(res.by_horizon(horizon, "B2"), res.sessions).get("score_bands", {})
     order = [bands[k]["mean_r"] for k in ("<60", "60-74", "75-84", "85+") if k in bands]
     mono = len(order) >= 2 and all(a <= b for a, b in zip(order, order[1:], strict=False))
     checks.append(("score bands monotonic", mono, json.dumps(bands)))
-    return Verdict(horizon, all(p for _, p, _ in checks), checks)
+    v = Verdict(horizon, False, checks, "A")
+    v.promoted = v.passed
+    return v
+
+
+def gate_b(options: dict | None, res: RunResult, horizon: str) -> Verdict:
+    """Gate B — does trading the signal through NIFTY options make money?
+
+    Archived (real recorded quotes) trades only; the synthetic layer never
+    counts. Passing Gate A says nothing about this.
+    """
+    checks: list[tuple[str, bool, str]] = []
+    ob = res.by_horizon(horizon)
+    arch = (options or {}).get("archived") or {}
+    rows = [r for r in arch.get("rows", []) if r.get("horizon") == horizon
+            and r.get("session") in set(res.sessions)]
+    with_lot = [r for r in rows if r.get("pnl_rupees") is not None]
+    n_min = MIN_OPTION_TRADES[horizon]
+    checks.append(("archived option trades", len(with_lot) >= n_min,
+                   f"{len(with_lot)} priced from real quotes with a known lot (need {n_min})"))
+    cov = len(rows) / len(ob) if ob else 0.0
+    checks.append(("quote coverage ≥70%", cov >= MIN_OPTION_COVERAGE,
+                   f"{cov:.0%} of {len(ob)} strategy trades had executable quotes"))
+    if with_lot:
+        pnl = np.array([r["pnl_rupees"] for r in with_lot])
+        lo, hi = _session_ci(with_lot, res.sessions)
+        checks.append(("option expectancy CI > 0 after costs", bool(lo > 0),
+                       f"₹{pnl.mean():+,.0f}/lot [{lo:+,.0f}, {hi:+,.0f}]"))
+        gaps = [r["pnl_rupees"] for r in with_lot if r.get("exit_reason") == "gap"]
+        if horizon == "overnight":
+            checks.append(("gap exits priced from open quotes", True,
+                           f"{len(gaps)} gap exits, mean ₹{np.mean(gaps):+,.0f}" if gaps
+                           else "no gap exits in sample"))
+    else:
+        checks.append(("option expectancy CI > 0 after costs", False, "no archived trades"))
+    v = Verdict(horizon, False, checks, "B")
+    v.promoted = v.passed
+    return v
+
+
+def verdict(res: RunResult, horizon: str, grid_positive_frac: float | None = None,
+            options: dict | None = None, sensitivity: dict | None = None,
+            breakdown: dict | None = None) -> Verdict:
+    """Combined promotion: Gate A AND Gate B. Checks are listed A then B."""
+    a = gate_a(res, horizon, grid_positive_frac, sensitivity, breakdown)
+    b = gate_b(options, res, horizon)
+    return Verdict(horizon, a.passed and b.passed,
+                   [(f"A: {n}", p, d) for n, p, d in a.checks]
+                   + [(f"B: {n}", p, d) for n, p, d in b.checks], "A+B")
+
+
+# ---------------------------------------------------------------------------
+# Breakdowns and parameter sensitivity
+# ---------------------------------------------------------------------------
+
+def _small(trades: list[Trade], sessions: list[str]) -> dict:
+    if not trades:
+        return {"n": 0}
+    p, lo, hi = expectancy_ci(trades, sessions, draws=500)
+    return {"n": len(trades), "mean_r": round(float(np.mean([t.r_net for t in trades])), 4),
+            "ci": [lo, hi], "win_rate": round(float(np.mean([t.r_net > 0 for t in trades])), 3)}
+
+
+def _dte_bucket(session: str, expiries: list[str] | None, weekday: int = 1) -> str:
+    d = date.fromisoformat(session)
+    if expiries:
+        nxt = next((date.fromisoformat(e) for e in sorted(expiries) if e >= session), None)
+    else:
+        nxt = d + timedelta(days=(weekday - d.weekday()) % 7)
+    if nxt is None:
+        return "unknown"
+    days = (nxt - d).days
+    return "expiry day" if days == 0 else ("1 day" if days == 1 else
+                                            ("2-3 days" if days <= 3 else "4+ days"))
+
+
+def breakdowns(trades: list[Trade], sessions: list[str], *,
+               vix_by_date: dict[str, float] | None = None,
+               expiries: list[str] | None = None) -> dict:
+    """Results split by direction, VIX regime (terciles) and expiry proximity."""
+    out = {"direction": {d: _small([t for t in trades if t.direction == d], sessions)
+                         for d in (BULLISH, "bearish")}}
+    if vix_by_date:
+        vals = sorted(v for k, v in vix_by_date.items() if k in set(sessions))
+        if len(vals) >= 3:
+            t1, t2 = vals[len(vals) // 3], vals[2 * len(vals) // 3]
+
+            def reg(t):
+                v = vix_by_date.get(t.session)
+                return None if v is None else ("low" if v < t1 else ("mid" if v < t2 else "high"))
+            out["vix_regime"] = {r: _small([t for t in trades if reg(t) == r], sessions)
+                                 for r in ("low", "mid", "high")}
+            out["vix_cuts"] = [round(t1, 2), round(t2, 2)]
+    buckets = defaultdict(list)
+    for t in trades:
+        buckets[_dte_bucket(t.session, expiries)].append(t)
+    out["expiry_proximity"] = {k: _small(v, sessions) for k, v in sorted(buckets.items())}
+    return out
+
+
+#: One-at-a-time sensitivity: each parameter moved to its neighbours while
+#: every other stays at the default.
+SENSITIVITY = {
+    "pivot_k": (2, 4),
+    "disp_body_atr": (0.8, 1.25),
+    "rvol_min": (1.0, 1.5),
+    "zone_age_bars": (12, 30),
+    "stop_buffer_atr": (0.05, 0.2),
+    "min_u_rr": (1.25, 2.0),
+    "max_zone_atr": (0.75, 1.5),
+}
+
+
+def run_sensitivity(bars, base: ObParams | None = None, *, horizon: str,
+                    sessions: list[str], cost_points: float = DEFAULT_COST_POINTS) -> dict:
+    """Expectancy at each neighbour; `fragile` lists parameters whose
+    neighbour flips the sign of the default's expectancy."""
+    base = base or ObParams()
+    keep = set(sessions)
+
+    def exp_for(p: ObParams) -> tuple[int, float]:
+        res = run(bars, p, cost_points=cost_points, baselines=False, horizons=(horizon,))
+        ob = [t for t in res.by_horizon(horizon) if t.session in keep]
+        return len(ob), (float(np.mean([t.r_net for t in ob])) if ob else float("nan"))
+
+    n0, e0 = exp_for(base)
+    rows, fragile = [{"param": "default", "value": "", "n": n0, "expectancy_r": round(e0, 4)}], []
+    for name, values in SENSITIVITY.items():
+        for v in values:
+            n, e = exp_for(replace(base, **{name: v}))
+            rows.append({"param": name, "value": v, "n": n, "expectancy_r": round(e, 4)})
+            if n and n0 and e0 == e0 and e == e and (e > 0) != (e0 > 0):
+                fragile.append(f"{name}={v}")
+    return {"rows": rows, "fragile": sorted(set(fragile)), "default_expectancy_r": round(e0, 4)}
 
 
 def run_grid(bars, base: ObParams | None = None, *, cost_points: float = DEFAULT_COST_POINTS,
-             horizon: str = "intraday") -> tuple[float, list[dict]]:
-    """§6.5 robustness grid. Returns (fraction of configs positive, rows)."""
+             horizon: str = "intraday", sessions: list[str] | None = None
+             ) -> tuple[float, list[dict]]:
+    """§6.5 robustness grid on the given (development) sessions.
+    Returns (fraction of configs positive, rows)."""
     rows = []
+    keep = set(sessions) if sessions else None
     for p in grid(base):
-        res = run(bars, p, cost_points=cost_points, baselines=False)
-        ob = res.by_horizon(horizon)
+        res = run(bars, p, cost_points=cost_points, baselines=False, horizons=(horizon,))
+        ob = [t for t in res.by_horizon(horizon) if keep is None or t.session in keep]
         point = float(np.mean([t.r_net for t in ob])) if ob else float("nan")
         rows.append({"pivot_k": p.pivot_k, "disp_body_atr": p.disp_body_atr,
                      "rvol_min": p.rvol_min, "zone_age_bars": p.zone_age_bars,
@@ -792,16 +1023,40 @@ def git_sha() -> str:
 
 
 def summarize(res: RunResult, *, grid_frac: float | None = None,
-              options: dict | None = None, calibration: dict | None = None) -> dict:
+              options: dict | None = None, calibration: dict | None = None,
+              sensitivity: dict | None = None, vix_by_date: dict | None = None,
+              expiries: list[str] | None = None, holdout: RunResult | None = None,
+              holdout_note: str = "") -> dict:
+    """Per-horizon report. `res` is the DEVELOPMENT part; gates judge it only.
+    The holdout block appears only when the caller unsealed it."""
     out = {"engine_version": ENGINE_VERSION, "params_hash": res.params.fingerprint(),
            "sessions": len(res.sessions), "setups": len(res.setups),
+           "dev_range": [res.sessions[0], res.sessions[-1]] if res.sessions else [],
            "engine": res.engine_counters, "rejections": res.rejections, "horizons": {}}
     for h in ("intraday", "overnight"):
         block = {"OB": metrics(res.by_horizon(h), res.sessions)}
-        for arm in ("B0", "B1", "B2", "B3"):
+        for arm in ("B0", "B1", "B2", "B3", "B4"):
             block[arm] = metrics(res.by_horizon(h, arm), res.sessions)
-        block["verdict"] = verdict(res, h, grid_frac).to_dict()
+        bd = breakdowns(res.by_horizon(h), res.sessions, vix_by_date=vix_by_date,
+                        expiries=expiries)
+        block["breakdowns"] = bd
+        sens = (sensitivity or {}).get(h)
+        a = gate_a(res, h, grid_frac if h == "intraday" else None, sens, bd)
+        b = gate_b(options, res, h)
+        block["gate_a"] = a.to_dict()
+        block["gate_b"] = b.to_dict()
+        block["promoted"] = a.passed and b.passed
+        block["verdict"] = verdict(res, h, grid_frac if h == "intraday" else None,
+                                   options, sens, bd).to_dict()
+        if sens:
+            block["sensitivity"] = sens
+        if holdout is not None:
+            block["holdout"] = {"OB": metrics(holdout.by_horizon(h), holdout.sessions),
+                                "range": [holdout.sessions[0], holdout.sessions[-1]]
+                                if holdout.sessions else []}
         out["horizons"][h] = block
+    if holdout is not None or holdout_note:
+        out["holdout_note"] = holdout_note
     if options is not None:
         # Per-trade rows stay out of the persisted summary (they are large and
         # live in the returned object); the summary keeps the statistics.

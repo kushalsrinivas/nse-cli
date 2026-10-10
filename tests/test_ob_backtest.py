@@ -148,8 +148,12 @@ class TestRunAndVerdict(unittest.TestCase):
         v = verdict(self.res, "intraday")
         names = [c[0] for c in v.checks]
         for n in ("sample size", "expectancy CI > 0", "beats B0", "beats B2", "beats B3",
-                  "grid robustness ≥70%", "no year > 50% of R", "score bands monotonic"):
-            self.assertIn(n, names)
+                  "beats B4", "grid robustness ≥70%", "no year > 50% of R",
+                  "score bands monotonic"):
+            self.assertIn("A: " + n, names)
+        for n in ("archived option trades", "quote coverage ≥70%",
+                  "option expectancy CI > 0 after costs"):
+            self.assertIn("B: " + n, names)
         self.assertFalse(v.promoted)
 
     def test_summary_is_json(self):
@@ -424,3 +428,126 @@ class TestVixHelpers(unittest.TestCase):
 
         got = vix_history(30, rest=Rest(), store=store)
         self.assertEqual(got["2026-10-09"], 13.1)
+
+
+class TestGatesAndMethodology(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from model.order_blocks import backtest as bt
+        from model.order_blocks.params import ObParams
+        from tests.test_ob_detect import random_walk_bars
+        cls.bt = bt
+        cls.params = ObParams(rvol_min=1.0, eligible_at=50.0)
+        cls.bars = random_walk_bars(sessions=30, seed=21)
+        cls.res = bt.run(cls.bars, cls.params)
+
+    def test_baselines_match_holding_period_and_time_of_day(self):
+        ob = {(t.session, t.horizon): t for t in self.res.trades}
+        for arm in ("B0", "B4"):
+            for b in self.res.baselines[arm]:
+                self.assertIsNotNone(b.max_exit_ts)
+                if b.reason == "matched_hold":
+                    self.assertGreaterEqual(b.exit_ts, b.max_exit_ts)
+                if b.horizon == "intraday":
+                    src = [t for t in self.res.trades if t.session == b.session and t.horizon == "intraday"]
+                    self.assertTrue(any(abs((b.trigger_ts - t.trigger_ts).total_seconds()) <= 1800
+                                        for t in src))
+        self.assertTrue(ob)
+        from collections import Counter
+        b4 = Counter(b.direction for b in self.res.baselines["B4"])
+        src = Counter(t.direction for t in self.res.trades)
+        for d, n in b4.items():                    # B4 keeps the strategy's direction mix
+            self.assertLessEqual(n, src[d])
+
+    def test_overnight_random_baselines_use_other_nights(self):
+        b0 = self.res.by_horizon("overnight", "B0")
+        self.assertTrue(b0)
+        for b in b0:
+            self.assertEqual(b.trigger_ts.time(), next(iter(self.res.by_horizon("overnight"))).trigger_ts.time())
+        src = {(t.session, t.direction) for t in self.res.by_horizon("overnight")}
+        self.assertTrue(any((b.session, b.direction) not in src for b in
+                            self.res.by_horizon("overnight", "B4")))
+
+    def test_gate_a_pass_does_not_imply_gate_b(self):
+        from unittest import mock
+        bt = self.bt
+        fake_pass = bt.Verdict("intraday", True, [("x", True, "")], "A")
+        with mock.patch.object(bt, "gate_a", return_value=fake_pass):
+            v = bt.verdict(self.res, "intraday", options=None)
+        self.assertFalse(v.promoted)                # no archived option trades
+        self.assertTrue(all(name.startswith("B:") for name, ok, _ in v.checks if not ok))
+
+    def test_holdout_split_is_chronological_and_disjoint(self):
+        dev, hold = self.bt.split_holdout(self.res, 0.2)
+        self.assertLess(dev.sessions[-1], hold.sessions[0])
+        self.assertEqual(len(dev.sessions) + len(hold.sessions), len(self.res.sessions))
+        self.assertTrue(all(t.session in set(hold.sessions) for t in hold.trades))
+        self.assertTrue(all(t.session in set(dev.sessions) for t in dev.trades))
+
+    def test_breakdowns(self):
+        sessions = self.res.sessions
+        vix = {d: 10.0 + i % 9 for i, d in enumerate(sessions)}
+        bd = self.bt.breakdowns(self.res.trades, sessions, vix_by_date=vix)
+        self.assertEqual(set(bd["direction"]), {"bullish", "bearish"})
+        self.assertEqual(set(bd["vix_regime"]), {"low", "mid", "high"})
+        total = sum(v["n"] for v in bd["expiry_proximity"].values())
+        self.assertEqual(total, len(self.res.trades))
+
+    def test_sensitivity_reports_every_neighbour(self):
+        out = self.bt.run_sensitivity(self.bars[: 375 * 12], self.params, horizon="intraday",
+                                      sessions=self.res.sessions)
+        names = {r["param"] for r in out["rows"]}
+        self.assertTrue(set(self.bt.SENSITIVITY) <= names)
+        self.assertIsInstance(out["fragile"], list)
+
+    def test_overnight_only_run_has_no_intraday_trades(self):
+        res = self.bt.run(self.bars, self.params, horizons=("overnight",))
+        self.assertTrue(all(t.horizon == "overnight" for t in res.trades))
+
+
+class TestHoldoutService(unittest.TestCase):
+    def _archive(self):
+        from data.kite.archive import MarketArchive, SeriesBar
+        from journal.ob_db import ObJournal
+        from tests.test_ob_detect import random_walk_bars
+        db = os.path.join(tempfile.mkdtemp(), "t.db")
+        a, j = MarketArchive(db), ObJournal(db)
+        bars = random_walk_bars(sessions=12, seed=4)
+        a.upsert_series([SeriesBar("NIFTY_SPOT", b.ts.strftime("%Y-%m-%d %H:%M"), b.open, b.high,
+                                   b.low, b.close) for b, _ in bars])
+        return a, j, bars[0][0].ts.date().isoformat(), bars[-1][0].ts.date().isoformat()
+
+    def test_holdout_sealed_then_unsealed_and_logged(self):
+        from services.order_blocks import run_backtest
+        a, j, frm, to = self._archive()
+        sealed = run_backtest(frm=frm, to=to, archive=a, journal=j, store=False, vix_by_date={})
+        self.assertIn("sealed", sealed.summary["holdout_note"])
+        self.assertNotIn("holdout", sealed.summary["horizons"]["intraday"])
+        first = run_backtest(frm=frm, to=to, archive=a, journal=j, store=False, vix_by_date={},
+                             unseal_holdout=True)
+        self.assertIn("viewing #1", first.summary["holdout_note"])
+        self.assertIn("holdout", first.summary["horizons"]["intraday"])
+        again = run_backtest(frm=frm, to=to, archive=a, journal=j, store=False, vix_by_date={},
+                             unseal_holdout=True)
+        self.assertIn("no longer an untouched test", again.summary["holdout_note"])
+
+    def test_evidence_taken_per_horizon_from_newest_covering_run(self):
+        import json as _json
+
+        from services.order_blocks import load_evidence
+        _a, j, _f, _t = self._archive()
+        j.save_run(run_id="R1", git_sha="x", params_json="{}", data_from="a", data_to="b",
+                   fold_spec={}, option_layer="none",
+                   summary={"horizons_run": ["intraday", "overnight"],
+                            "horizons": {"intraday": {"promoted": True},
+                                         "overnight": {"promoted": True}}})
+        j.conn.execute("UPDATE ob_backtest_runs SET created_at='2026-01-01T00:00:00' WHERE run_id='R1'")
+        j.conn.commit()
+        j.save_run(run_id="R2", git_sha="x", params_json="{}", data_from="a", data_to="b",
+                   fold_spec={}, option_layer="none",
+                   summary={"horizons_run": ["overnight"],
+                            "horizons": {"overnight": {"promoted": False}}})
+        ev = load_evidence(j)
+        self.assertFalse(ev.promoted["overnight"])   # newest overnight run
+        self.assertTrue(ev.promoted["intraday"])     # older run is the newest covering intraday
+        _json.dumps(ev.promoted)

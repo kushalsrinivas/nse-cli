@@ -110,13 +110,51 @@ def positions_table(rows, title: str = "Paper positions") -> Table:
     return t
 
 
-def backtest_panels(summary: dict) -> list:
+def _gate_table(title: str, gate: dict) -> Table:
+    t = Table(title=title + (": PASS" if gate.get("passed") else ": NOT PASSED"))
+    t.add_column("Check")
+    t.add_column("Pass")
+    t.add_column("Detail", overflow="fold")
+    for c in gate.get("checks", []):
+        t.add_row(c["name"], Text("yes" if c["pass"] else "no", "green" if c["pass"] else "red"),
+                  c["detail"])
+    return t
+
+
+def _small_table(title: str, rows: dict) -> Table:
+    t = Table(title=title)
+    for col in ("Bucket", "n", "mean R", "95% CI", "Win%"):
+        t.add_column(col)
+    for k, m in rows.items():
+        if not m.get("n"):
+            t.add_row(k, "0", "—", "—", "—")
+            continue
+        ci = m.get("ci", [None, None])
+        t.add_row(k, str(m["n"]), f"{m['mean_r']:+.3f}", f"[{ci[0]:+.3f}, {ci[1]:+.3f}]",
+                  f"{m['win_rate']:.0%}")
+    return t
+
+
+def backtest_panels(summary: dict, horizon: str | None = None) -> list:
+    """Report panels, one horizon at a time. Underlying (Gate A) and options
+    (Gate B) results are shown separately and never folded together."""
     out = []
+    if summary.get("holdout_note"):
+        out.append(Text(summary["holdout_note"], "yellow"))
     for h, block in summary.get("horizons", {}).items():
-        t = Table(title=f"{h} — underlying layer (R, after {summary.get('cost_points')} pt costs)")
+        if horizon and h != horizon:
+            continue
+        if not (block.get("OB") or {}).get("n") and h not in summary.get("horizons_run", [h]):
+            continue
+        out.append(Text(f"\n━━ {h.upper()} ━━  "
+                        + ("PROMOTED (Gate A and Gate B passed)" if block.get("promoted")
+                           else "NOT PROMOTED — stays shadow/paper"),
+                        "bold green" if block.get("promoted") else "bold red"))
+        t = Table(title=f"{h} — underlying signal (R, after {summary.get('cost_points')} pt "
+                        f"costs, development sessions {summary.get('dev_range')})")
         for col in ("Arm", "n", "E[R]", "95% CI", "Win%", "PF", "MaxDD R", "Total R"):
             t.add_column(col)
-        for arm in ("OB", "B0", "B1", "B2", "B3"):
+        for arm in ("OB", "B0", "B1", "B2", "B3", "B4"):
             m = block.get(arm, {})
             if not m.get("n"):
                 t.add_row(arm, "0", "—", "—", "—", "—", "—", "—")
@@ -126,31 +164,52 @@ def backtest_panels(summary: dict) -> list:
                       f"[{ci[0]:+.3f}, {ci[1]:+.3f}]", f"{m['win_rate']:.0%}",
                       str(m.get("profit_factor")), str(m.get("max_dd_r")), str(m.get("total_r")))
         out.append(t)
-        v = block.get("verdict", {})
-        vt = Table(title=f"{h} promotion verdict: "
-                         + ("PROMOTED" if v.get("promoted") else "NOT PROMOTED (stays shadow)"))
-        vt.add_column("Check")
-        vt.add_column("Pass")
-        vt.add_column("Detail", overflow="fold")
-        for c in v.get("checks", []):
-            vt.add_row(c["name"], Text("yes" if c["pass"] else "no",
-                                       "green" if c["pass"] else "red"), c["detail"])
-        out.append(vt)
+        out.append(Text("OB strategy · B0 random time+direction · B1 always long · B2 every setup · "
+                        "B3 hourly trend · B4 random time, same direction — all matched on session, "
+                        "time of day, holding period and stop width", "dim"))
+        bd = block.get("breakdowns") or {}
+        if bd.get("direction"):
+            out.append(_small_table(f"{h} by direction", bd["direction"]))
+        if bd.get("vix_regime"):
+            out.append(_small_table(f"{h} by VIX regime (cuts {bd.get('vix_cuts')})", bd["vix_regime"]))
+        if bd.get("expiry_proximity"):
+            out.append(_small_table(f"{h} by days to weekly expiry", bd["expiry_proximity"]))
+        sens = block.get("sensitivity")
+        if sens:
+            st = Table(title=f"{h} parameter sensitivity (one at a time)")
+            for col in ("Parameter", "Value", "n", "E[R]"):
+                st.add_column(col)
+            for r in sens["rows"]:
+                st.add_row(str(r["param"]), str(r["value"]), str(r["n"]), f"{r['expectancy_r']:+.4f}")
+            out.append(st)
+        out.append(_gate_table(f"{h} Gate A — underlying signal", block.get("gate_a", {})))
+        out.append(_gate_table(f"{h} Gate B — options execution (real quotes only)",
+                               block.get("gate_b", {})))
+        if block.get("holdout"):
+            m = block["holdout"]["OB"]
+            out.append(Text(f"holdout {block['holdout']['range']}: n={m.get('n', 0)} "
+                            f"E[R]={m.get('expectancy_r')} CI={m.get('expectancy_ci')}", "yellow"))
     opt = summary.get("options")
     if opt:
-        t = Table(title="Option layer (₹ per trade, 1 lot)")
-        for col in ("Layer", "Label", "n", "E[₹]", "Total ₹", "Win%", "Charges", "Premium"):
+        t = Table(title="Option layer (per lot where the trade-date lot is known)")
+        for col in ("Layer", "Label", "n", "with lot", "E[pts]", "E[₹]", "95% CI ₹", "Win%",
+                    "Coverage"):
             t.add_column(col)
         for name, m in opt.items():
             if not m.get("n"):
-                t.add_row(name, m.get("label", ""), "0", "—", "—", "—", "—", "—")
+                t.add_row(name, m.get("label", ""), "0", "—", "—", "—", "—", "—", "—")
                 continue
-            t.add_row(name, m["label"], str(m["n"]), f"{m['expectancy_rupees']:+,.0f}",
-                      f"{m['total_rupees']:+,.0f}", f"{m['win_rate']:.0%}",
-                      f"{m['avg_charges']:,.0f}", f"{m['avg_premium']:,.0f}")
+            ci = m.get("expectancy_ci")
+            t.add_row(name, m["label"], str(m["n"]), str(m.get("n_with_lot", 0)),
+                      f"{m['expectancy_points']:+.2f}",
+                      f"{m['expectancy_rupees']:+,.0f}" if "expectancy_rupees" in m else "—",
+                      f"[{ci[0]:+,.0f}, {ci[1]:+,.0f}]" if ci else "—",
+                      f"{m['win_rate']:.0%}",
+                      f"{m['coverage']:.0%}" if "coverage" in m else "n/a")
         out.append(t)
+        out.append(Text("Synthetic is PROVISIONAL and never counts toward Gate B.", "dim"))
     cal = summary.get("calibration")
     if cal:
-        out.append(Text(f"Calibration: {cal.get('status')} · Brier {cal.get('brier')} vs base "
-                        f"{cal.get('brier_base')} · skill {cal.get('brier_skill')}"))
+        out.append(Text(f"Calibration (dev only): {cal.get('status')} · Brier {cal.get('brier')} "
+                        f"vs base {cal.get('brier_base')} · skill {cal.get('brier_skill')}"))
     return out
