@@ -44,7 +44,8 @@ def build_zone(brk: Break, bars: list[Bar], atr: list[float | None],
     piv = brk.swing.pivot_index
     if piv + 1 > b:
         return None, "no bars between swing and break"
-    o = _leg_origin(bars, piv + 1, b, bullish)
+    floor = getattr(bars, "first_index", 0)      # bounded ring: oldest bar held
+    o = _leg_origin(bars, max(piv + 1, floor), b, bullish)
     leg_len = b - o + 1
     if leg_len > params.max_leg_bars:
         return None, f"leg {leg_len} bars > {params.max_leg_bars}"
@@ -59,7 +60,7 @@ def build_zone(brk: Break, bars: list[Bar], atr: list[float | None],
         return None, f"displacement body {body_atr:.2f} / range {range_atr:.2f} ATR"
 
     s = o
-    for j in range(o, max(o - params.source_lookback, 0) - 1, -1):
+    for j in range(o, max(o - params.source_lookback, floor) - 1, -1):
         x = bars[j]
         doji = x.body < params.doji_atr * atr_b
         if doji or (x.bearish if bullish else x.bullish):
@@ -82,7 +83,7 @@ def build_zone(brk: Break, bars: list[Bar], atr: list[float | None],
 
     swept = None
     kind = "low" if bullish else "high"
-    for j in range(max(o - params.sweep_lookback, 0), o + 1):
+    for j in range(max(o - params.sweep_lookback, floor), o + 1):
         x = bars[j]
         for sw in swings.confirmed(x.ts, kind):
             if bullish and x.low < sw.price < x.close:

@@ -22,6 +22,7 @@ from model.order_blocks.detect import attach_fvg, build_zone
 from model.order_blocks.indicators import AtrTracker, RvolTracker
 from model.order_blocks.lifecycle import ZoneBook, mark_triggered
 from model.order_blocks.params import ObParams
+from model.order_blocks.ring import RingList
 from model.order_blocks.score import score_zone
 from model.order_blocks.structure import StructureTracker
 from model.order_blocks.swings import SwingTracker
@@ -39,6 +40,8 @@ from model.order_blocks.types import (
 log = logging.getLogger(__name__)
 
 _ORDER = {"60m": 0, "15m": 1, "5m": 2}
+MAX_SWINGS = 120           # bounded mode: swings kept per timeframe (references use the last 60)
+MAX_BREAKS = 50
 
 
 @dataclass
@@ -56,7 +59,12 @@ class _TfState:
 class ObEngine:
     def __init__(self, params: ObParams | None = None, *,
                  series: str = "NIFTY_SPOT",
-                 horizons: tuple[str, ...] = ("intraday", "overnight")) -> None:
+                 horizons: tuple[str, ...] = ("intraday", "overnight"),
+                 max_bars: int | dict[str, int] | None = None) -> None:
+        """`max_bars` bounds per-timeframe state (bars, ATR, rvol, swing
+        bars) with absolute-index rings; None keeps the unbounded lists the
+        NIFTY backtests were validated with. Results are identical as long
+        as the ring exceeds every look-back (see ring.py)."""
         self.p = params or ObParams()
         self.series = series
         self.horizons = horizons
@@ -71,6 +79,14 @@ class ObEngine:
                             self.p.rvol_tod_min_sessions),
                 SwingTracker(k), StructureTracker(), [],
                 ZoneBook(self.p) if tf in self.p.detect_tfs else None)
+        self.max_bars = max_bars
+        if max_bars is not None:
+            for tf, st in self.tf.items():
+                n = max_bars.get(tf, 400) if isinstance(max_bars, dict) else max_bars
+                st.bars = RingList(n)
+                st.atr.values = RingList(n)
+                st.rvol.values = RingList(n)
+                st.swings.bars = RingList(n)
         self.watches: dict[str, IntradayWatch] = {}
         self._day: date | None = None
         self._day_hi = self._day_lo = None
@@ -138,6 +154,11 @@ class ObEngine:
         st.atr.add(bar)
         st.rvol.add(bar, contract)
         new_swings = st.swings.add(bar)
+        if self.max_bars is not None:
+            if len(st.swings.swings) > MAX_SWINGS:
+                del st.swings.swings[:len(st.swings.swings) - MAX_SWINGS]
+            if len(st.structure.breaks) > MAX_BREAKS:
+                del st.structure.breaks[:len(st.structure.breaks) - MAX_BREAKS]
         trend_before = st.structure.trend
         st.structure.add_swings(new_swings)
         brk = st.structure.on_bar(bar, idx)
