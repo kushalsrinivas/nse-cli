@@ -303,3 +303,67 @@ def run_audit(*, days: int = 30, rest=None, store=None, archive=None,
     audit_archives(report, archive, chain_archive)
     audit_quotes(report, archive, now)
     return report
+
+
+# ---------------------------------------------------------------------------
+# Options-archive coverage (`model_cli.py ob-coverage`)
+# ---------------------------------------------------------------------------
+
+def coverage_report(archive, journal=None, *, days: int = 10,
+                    now: datetime | None = None) -> list[dict]:
+    """Per session: how much executable option data was captured.
+
+    `minute_coverage` is the share of the 375 session minutes with at least
+    one two-sided quote on any leg. `open_ok` / `close_ok` say whether the
+    09:15-09:20 and 15:15-15:30 windows were sampled; overnight exits and
+    entries are priced from exactly those windows. When a journal is given,
+    each paper position is checked for a quote within 10 s of its entry and
+    exit — a position without one cannot be reconciled against a backtest.
+    """
+    now = now or datetime.now()
+    out = []
+    for back in range(days, -1, -1):
+        d = (now - timedelta(days=back)).date()
+        if d.weekday() >= 5:
+            continue
+        frm, to = f"{d}T09:00:00", f"{d}T15:45:00"
+        qs = archive.quotes(frm=frm, to=to, limit=2_000_000)
+        if not qs:
+            out.append({"session": d.isoformat(), "rows": 0, "contracts": 0,
+                        "minute_coverage": 0.0, "open_ok": False, "close_ok": False,
+                        "signal_snaps": 0, "with_identity": 0.0, "positions": []})
+            continue
+        two = [q for q in qs if q.spread is not None and q.spread >= 0]
+        minutes = {q.captured_at[11:16] for q in two if "09:15" <= q.captured_at[11:16] <= "15:29"}
+        reasons: dict[str, int] = {}
+        for q in qs:
+            reasons[q.reason] = reasons.get(q.reason, 0) + 1
+        row = {"session": d.isoformat(), "rows": len(qs),
+               "contracts": len({q.tradingsymbol for q in qs}),
+               "minute_coverage": round(len(minutes) / 375, 3),
+               "open_ok": reasons.get("open_snapshot", 0) > 0,
+               "close_ok": reasons.get("close_snapshot", 0) > 0,
+               "signal_snaps": reasons.get("signal", 0),
+               "with_identity": round(sum(1 for q in qs if q.expiry and q.strike) / len(qs), 3),
+               "positions": []}
+        if journal is not None:
+            for p in journal.positions(mode="live"):
+                if p.opened_at[:10] != d.isoformat() and (p.closed_at or "")[:10] != d.isoformat():
+                    continue
+                syms = [leg["tradingsymbol"] for leg in p.legs]
+                row["positions"].append({
+                    "position_id": p.position_id,
+                    "entry_quote": _has_quote(archive, syms, p.opened_at),
+                    "exit_quote": _has_quote(archive, syms, p.closed_at) if p.closed_at else None})
+        out.append(row)
+    return out
+
+
+def _has_quote(archive, symbols: list[str], at: str | None, window: int = 10) -> bool:
+    if not at:
+        return False
+    t = datetime.fromisoformat(at)
+    lo = (t - timedelta(seconds=window)).isoformat(timespec="seconds")
+    hi = (t + timedelta(seconds=window)).isoformat(timespec="seconds")
+    return all(any(q.spread is not None for q in archive.quotes(s, frm=lo, to=hi))
+               for s in symbols)

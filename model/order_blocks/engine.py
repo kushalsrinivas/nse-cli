@@ -31,6 +31,7 @@ from model.order_blocks.types import (
     TOUCHED,
     Bar,
     Event,
+    LookAheadError,
     Setup,
     Swing,
 )
@@ -91,6 +92,12 @@ class ObEngine:
         for st in self.tf.values():
             completed.extend(st.builder.add(m1))
         completed.sort(key=lambda b: (b.end, _ORDER[b.tf]))
+        for bar in completed:
+            # A higher-timeframe bar may only be built from 1m bars that have
+            # already closed: its end can never be later than this one's.
+            if bar.end > m1.end:
+                raise LookAheadError(
+                    f"{bar.tf} bar ending {bar.end} emitted by 1m bar ending {m1.end}")
         events: list[Event] = []
         for bar in completed:
             events.extend(self._on_bar(bar, contract))
@@ -184,7 +191,11 @@ class ObEngine:
                           self.prior_day, self.p)
         score = score_zone(zone, self.htf_trend, self.p)
         self.counters["setups"] += 1
-        return Setup(zone, horizon, trigger_bar.end, plan, score, self.htf_trend, atr)
+        available = self.last_m1.end if self.last_m1 else trigger_bar.end
+        if available < trigger_bar.end:
+            raise LookAheadError(f"setup on bar ending {trigger_bar.end} before data at {available}")
+        return Setup(zone, horizon, trigger_bar.end, plan, score, self.htf_trend, atr,
+                     available_at=available)
 
     def _intraday(self, bar5: Bar) -> list[Event]:
         events = []

@@ -444,3 +444,82 @@ class TestEngineNoLookAhead(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAvailableAt(unittest.TestCase):
+    """Higher timeframes come only from completed 1m bars; nothing acts early."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bars = random_walk_bars(sessions=6, seed=31)
+
+    def test_resampled_bars_match_independent_resample(self):
+        import pandas as pd
+
+        from model.order_blocks.engine import ObEngine
+        eng = ObEngine()
+        for bar, c in self.bars:
+            eng.on_minute(bar, c)
+        m1 = pd.DataFrame([{"ts": b.ts, "open": b.open, "high": b.high, "low": b.low,
+                            "close": b.close, "volume": b.volume} for b, _ in self.bars]).set_index("ts")
+        for tf, rule in (("5m", "5min"), ("15m", "15min"), ("60m", "60min")):
+            ref = []
+            for _day, g in m1.groupby(m1.index.date):
+                r = g.resample(rule, origin=g.index[0].replace(hour=9, minute=15)).agg(
+                    {"open": "first", "high": "max", "low": "min", "close": "last",
+                     "volume": "sum"}).dropna(subset=["close"])
+                close = g.index[0].replace(hour=15, minute=30)
+                ref.append(r[r.index + pd.Timedelta(rule) <= close])     # no partial bins
+            ref = pd.concat(ref)
+            got = eng.tf[tf].bars
+            self.assertEqual(len(got), len(ref), tf)
+            for b, (ts, row) in zip(got, ref.iterrows(), strict=True):
+                self.assertEqual(b.ts, ts.to_pydatetime())
+                self.assertAlmostEqual(b.high, row["high"])
+                self.assertAlmostEqual(b.low, row["low"])
+                self.assertAlmostEqual(b.close, row["close"])
+                self.assertEqual(b.volume, int(row["volume"]))
+
+    def test_setups_never_precede_their_data(self):
+        from model.order_blocks.engine import ObEngine
+        from model.order_blocks.params import ObParams
+        eng = ObEngine(ObParams(rvol_min=1.0))
+        n = 0
+        for bar, c in self.bars:
+            for ev in eng.on_minute(bar, c):
+                if ev.kind == "setup":
+                    n += 1
+                    s = ev.setup
+                    self.assertEqual(s.available_at, bar.end)        # the settling 1m bar
+                    self.assertGreaterEqual(s.available_at, s.trigger_ts)
+                    self.assertLessEqual(s.zone.first_eligible_ts, s.trigger_ts)
+        self.assertGreater(n, 0)
+
+    def test_backtest_refuses_fill_before_available(self):
+        from model.order_blocks.backtest import Trade, _Book, simulate
+        from model.order_blocks.types import LookAheadError
+        t0 = datetime(2026, 10, 6, 9, 15)
+        bars = [(Bar(t0 + timedelta(minutes=i), "1m", 100, 101, 99, 100), "") for i in range(60)]
+        t = Trade("OB", "intraday", "bullish", "2026-10-06", t0 + timedelta(minutes=10),
+                  t0 + timedelta(minutes=10), 100, 95, 110)
+        t.available_at = t0 + timedelta(minutes=20)
+        with self.assertRaises(LookAheadError):
+            simulate(t, _Book(bars), 0.0)
+
+    def test_decision_gate_fails_on_early_clock(self):
+        from execution.governor import BookState
+        from model.order_blocks.params import ObParams
+        from model.order_blocks.score import score_zone
+        from model.order_blocks.types import Setup, TradePlan, Zone
+        from services.order_blocks import Context, evaluate
+        now = datetime(2026, 10, 6, 11, 0)
+        z = Zone("z", "S", "15m", "bullish", now, now, now, 24950, 24990, 25100, now, 24940,
+                 40, 1.2, 1.8, 1.4)
+        s = Setup(z, "intraday", now, TradePlan("bullish", "intraday", 25000, 24940, 25150, "swing"),
+                  score_zone(z, "up", ObParams()), "up", 40, available_at=now + timedelta(seconds=30))
+        ev = evaluate(s, Context(now, 25000, 13.0), chains={}, lot_size_for=lambda x: 65,
+                      book=BookState(equity=1e6), expected_lot=65)
+        gate = next(c for c in ev.checks if c.name == "Decision after data")
+        self.assertEqual(gate.status.value, "fail")
+        self.assertEqual(ev.decision, "NO-GO")
+        self.assertEqual(ev.signal.available_at, "2026-10-06T11:00:30")

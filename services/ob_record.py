@@ -18,6 +18,9 @@ from datetime import time as dtime
 log = logging.getLogger(__name__)
 
 OPEN_WINDOW = (dtime(9, 15), dtime(9, 20))
+#: Overnight entries are decided 15:15-15:25 and archived chains are taken at
+#: 15:25, so the close gets the same dense sampling as the open.
+CLOSE_WINDOW = (dtime(15, 15), dtime(15, 30))
 OPEN_SNAPSHOT_EVERY = 15.0
 
 
@@ -36,6 +39,19 @@ def _in_open_window(now: datetime) -> bool:
     return OPEN_WINDOW[0] <= now.time() <= OPEN_WINDOW[1]
 
 
+def _in_close_window(now: datetime) -> bool:
+    return CLOSE_WINDOW[0] <= now.time() <= CLOSE_WINDOW[1]
+
+
+def snapshot_plan(now: datetime, every: float) -> tuple[float, str]:
+    """(interval seconds, quote reason) for this moment of the session."""
+    if _in_open_window(now):
+        return OPEN_SNAPSHOT_EVERY, "open_snapshot"
+    if _in_close_window(now):
+        return OPEN_SNAPSHOT_EVERY, "close_snapshot"
+    return every, "periodic"
+
+
 async def record_loop(recorder, client, *, minutes: float,
                       snapshot_every: float = 60.0, on_status=None, on_second=None,
                       clock=datetime.now, sleep=asyncio.sleep) -> None:
@@ -49,9 +65,8 @@ async def record_loop(recorder, client, *, minutes: float,
         now = clock()
         if on_second is not None:
             on_second(now)
-        every = OPEN_SNAPSHOT_EVERY if _in_open_window(now) else snapshot_every
+        every, reason = snapshot_plan(now, snapshot_every)
         if t - last_snap >= every:
-            reason = "open_snapshot" if _in_open_window(now) else "periodic"
             n = recorder.snapshot(now, reason=reason)
             last_snap = t
             spot = recorder.spot()

@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS ob_signals (
     laya_json TEXT DEFAULT '',
     data_age_sec REAL,
     vix REAL,
+    available_at TEXT,
     engine_version TEXT NOT NULL,
     params_hash TEXT NOT NULL,
     mode TEXT NOT NULL CHECK(mode IN ('live','backtest')),
@@ -225,6 +226,7 @@ class SignalRecord:
     laya_json: str = ""
     data_age_sec: float | None = None
     vix: float | None = None
+    available_at: str | None = None
     created_at: str = ""
 
     @property
@@ -327,6 +329,14 @@ class ObJournal:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a table was first created."""
+        have = {r[1] for r in self.conn.execute("PRAGMA table_info(ob_signals)")}
+        if "available_at" not in have:
+            self.conn.execute("ALTER TABLE ob_signals ADD COLUMN available_at TEXT")
+            self.conn.commit()
 
     # -- generic -------------------------------------------------------------
 

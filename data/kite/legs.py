@@ -239,7 +239,8 @@ class LegRecorder:
             else:
                 options.append(OptionBar(leg.exchange, leg.tradingsymbol, c.ts,
                                          c.open, c.high, c.low, c.close,
-                                         c.volume, c.oi, "kite_ws"))
+                                         c.volume, c.oi, "kite_ws",
+                                         leg.expiry, leg.strike, leg.kind))
         n = 0
         if series:
             n += self.archive.upsert_series(series)
@@ -273,7 +274,8 @@ class LegRecorder:
             exchange_ts=ets.isoformat(timespec="seconds") if ets else None,
             spot=spot, ltp=ltp, bid=bid, bid_qty=bq, ask=ask, ask_qty=aq,
             depth_json=json.dumps(tick.get("depth")) if with_depth and tick.get("depth") else "",
-            volume=tick.get("volume"), oi=tick.get("oi"), iv=iv, reason=reason)
+            volume=tick.get("volume"), oi=tick.get("oi"), iv=iv, reason=reason,
+            expiry=leg.expiry, strike=leg.strike, option_type=leg.kind)
 
     def snapshot(self, now: datetime | None = None, reason: str = "periodic",
                  symbols: set[str] | None = None, with_depth: bool = False) -> int:

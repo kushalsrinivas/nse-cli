@@ -29,7 +29,7 @@ SERIES_SPOT = "NIFTY_SPOT"
 SERIES_FUT1 = "NIFTY_FUT1"
 SERIES = (SERIES_SPOT, SERIES_FUT1)
 SOURCES = ("kite_hist", "kite_ws")
-QUOTE_REASONS = ("periodic", "signal", "fill", "exit", "open_snapshot")
+QUOTE_REASONS = ("periodic", "signal", "fill", "exit", "open_snapshot", "close_snapshot")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ob_series_1m (
@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS option_candles_1m (
     volume INTEGER NOT NULL DEFAULT 0,
     oi INTEGER,
     source TEXT NOT NULL CHECK(source IN ('kite_hist', 'kite_ws')),
+    expiry TEXT DEFAULT '',
+    strike REAL,
+    option_type TEXT DEFAULT '',
     UNIQUE (exchange, tradingsymbol, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_oc1m_sym_ts ON option_candles_1m(tradingsymbol, ts);
@@ -66,7 +69,11 @@ CREATE TABLE IF NOT EXISTS option_quotes (
     volume INTEGER, oi INTEGER,
     iv REAL,
     reason TEXT NOT NULL DEFAULT 'periodic'
-        CHECK(reason IN ('periodic', 'signal', 'fill', 'exit', 'open_snapshot')),
+        CHECK(reason IN ('periodic', 'signal', 'fill', 'exit', 'open_snapshot',
+                         'close_snapshot')),
+    expiry TEXT DEFAULT '',
+    strike REAL,
+    option_type TEXT DEFAULT '',
     UNIQUE (exchange, tradingsymbol, captured_at)
 );
 CREATE INDEX IF NOT EXISTS idx_oq_sym_ts ON option_quotes(tradingsymbol, captured_at);
@@ -99,6 +106,9 @@ class OptionBar:
     volume: int = 0
     oi: int | None = None
     source: str = "kite_hist"
+    expiry: str = ""                 # contract identity travels with every row:
+    strike: float | None = None      # tradingsymbols are reused across years,
+    option_type: str = ""            # expiry + strike + CE/PE are not
 
 
 @dataclass
@@ -118,6 +128,9 @@ class OptionQuote:
     oi: int | None = None
     iv: float | None = None      # percent, like chain legs
     reason: str = "periodic"
+    expiry: str = ""
+    strike: float | None = None
+    option_type: str = ""
 
     @property
     def spread(self) -> float | None:
@@ -131,7 +144,31 @@ class MarketArchive:
         self.db_path = Path(db_path or SETTINGS.db_path)
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
+        self._migrate()
         self.conn.executescript(_SCHEMA)
+
+    def _migrate(self) -> None:
+        """Bring tables created by earlier versions up to the current schema.
+
+        SQLite cannot alter a CHECK constraint, so a table missing the new
+        columns or quote reasons is rebuilt and its rows copied across.
+        """
+        for table in ("option_candles_1m", "option_quotes"):
+            row = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if row is None:
+                continue
+            stale = "option_type" not in row[0] or (
+                table == "option_quotes" and "close_snapshot" not in row[0])
+            if not stale:
+                continue
+            old_cols = [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]
+            self.conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+            self.conn.executescript(_SCHEMA)
+            cols = ", ".join(old_cols)
+            self.conn.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM {table}_old")
+            self.conn.execute(f"DROP TABLE {table}_old")
+            self.conn.commit()
 
     # -- underlying series --------------------------------------------------
 
@@ -193,14 +230,16 @@ class MarketArchive:
             self.conn.execute(
                 """INSERT INTO option_candles_1m
                    (exchange, tradingsymbol, ts, open, high, low, close,
-                    volume, oi, source)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                    volume, oi, source, expiry, strike, option_type)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT (exchange, tradingsymbol, ts) DO UPDATE SET
                      open=excluded.open, high=excluded.high, low=excluded.low,
                      close=excluded.close, volume=excluded.volume,
-                     oi=excluded.oi, source=excluded.source""",
+                     oi=excluded.oi, source=excluded.source,
+                     expiry=excluded.expiry, strike=excluded.strike,
+                     option_type=excluded.option_type""",
                 (b.exchange, b.tradingsymbol, b.ts, b.open, b.high, b.low,
-                 b.close, b.volume, b.oi, b.source))
+                 b.close, b.volume, b.oi, b.source, b.expiry, b.strike, b.option_type))
             n += 1
         self.conn.commit()
         return n
@@ -235,11 +274,12 @@ class MarketArchive:
                 """INSERT OR IGNORE INTO option_quotes
                    (exchange, tradingsymbol, captured_at, exchange_ts, spot,
                     ltp, bid, bid_qty, ask, ask_qty, depth_json, volume, oi,
-                    iv, reason)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    iv, reason, expiry, strike, option_type)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (q.exchange, q.tradingsymbol, q.captured_at, q.exchange_ts,
                  q.spot, q.ltp, q.bid, q.bid_qty, q.ask, q.ask_qty,
-                 q.depth_json, q.volume, q.oi, q.iv, q.reason))
+                 q.depth_json, q.volume, q.oi, q.iv, q.reason,
+                 q.expiry, q.strike, q.option_type))
             n += cur.rowcount
         self.conn.commit()
         return n

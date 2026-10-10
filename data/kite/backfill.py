@@ -230,7 +230,8 @@ def backfill_options(rest, archive: MarketArchive, legs, *, days: int,
                         leg.exchange, leg.tradingsymbol, ts, float(r["open"]),
                         float(r["high"]), float(r["low"]), float(r["close"]),
                         int(r.get("volume") or 0),
-                        int(oi) if oi not in (None, "") else None, "kite_hist"))
+                        int(oi) if oi not in (None, "") else None, "kite_hist",
+                        leg.expiry, leg.strike, leg.instrument_type))
                     _note_span(res, ts)
                 except (KeyError, TypeError, ValueError):
                     continue

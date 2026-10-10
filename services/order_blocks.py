@@ -176,6 +176,13 @@ def evaluate(setup: Setup, ctx: Context, *, chains: dict[str, list[LegQuote]],
         killed=kill_switch.is_engaged(),
         evidence_passed=evidence.promoted.get(setup.horizon))
     checks = gates(g)
+    if setup.available_at is not None:
+        from model.confluence.types import ConditionCheck, ConditionStatus
+        early = ctx.now < setup.available_at
+        checks.append(ConditionCheck(
+            "Decision after data", ConditionStatus.FAIL if early else ConditionStatus.PASS,
+            f"decided {ctx.now:%H:%M:%S}, data available {setup.available_at:%H:%M:%S}"
+            + (" — clock skew or look-ahead" if early else "")))
     decision, reasons = decide(setup.score.total, checks, setup.horizon,
                                evidence.promoted.get("overnight"), params)
 
@@ -209,7 +216,8 @@ def evaluate(setup: Setup, ctx: Context, *, chains: dict[str, list[LegQuote]],
         risk_rupees=sizing.risk_rupees if sizing and decision == "GO" else None,
         blocked_reasons="; ".join(reasons),
         laya_json=json.dumps(laya_out) if laya_out else "",
-        data_age_sec=ctx.spot_age_sec, vix=ctx.vix)
+        data_age_sec=ctx.spot_age_sec, vix=ctx.vix,
+        available_at=setup.available_at.isoformat(timespec="seconds") if setup.available_at else None)
     return Evaluation(setup, rec, sel, sizing, decision, reasons, checks, laya_out)
 
 
@@ -438,7 +446,8 @@ class PaperSession:
                  evidence: Evidence | None = None, events: list[str] | None = None,
                  spot_age=lambda: None, feed_ok=lambda: None, clock=datetime.now,
                  run_id: str = "live", laya=None, laya_enforce: bool = False,
-                 on_entry=None, expected_lot: int | None = None) -> None:
+                 on_entry=None, expected_lot: int | None = None,
+                 snapshot=None) -> None:
         self.engine = engine
         self.journal = journal
         self.broker = broker
@@ -460,6 +469,9 @@ class PaperSession:
         self.laya_enforce = laya_enforce
         self.on_entry = on_entry
         self.expected_lot = expected_lot
+        #: snapshot(symbols, reason): record full depth for these legs now.
+        #: Every decision, fill and exit leaves an executable-price trail.
+        self.snapshot = snapshot
         self.replaying = False
         self.last_bar: Bar | None = None
         self.prev_close_mark: dict[str, float] = {}
@@ -517,6 +529,8 @@ class PaperSession:
                       rules=self.rules, laya=self.laya, laya_enforce=self.laya_enforce,
                       expected_lot=self.expected_lot)
         ev.signal, ev.inserted = self.journal.add_signal(ev.signal)
+        self._snap({q.tradingsymbol for c in ev.selection.candidates for q in c.legs},
+                   "signal")
         self.journal.log_event("signal", {"decision": ev.decision, "reasons": ev.reasons,
                                           "score": setup.score.total},
                                run_id=self.run_id, ref_id=ev.signal.signal_id)
@@ -561,6 +575,7 @@ class PaperSession:
             o_stop=sig.o_stop, o_target=sig.o_target, risk_rupees=sig.risk_rupees,
             mode="live", run_id=self.run_id)
         pos, _ = self.journal.open_position(pos)
+        self._snap({q.tradingsymbol for q in choice.legs}, "fill")
         self.counters["entries"] += 1
         self.journal.log_event("entry", {"position_id": pos.position_id, "net": net,
                                          "lots": sig.lots}, run_id=self.run_id,
@@ -582,6 +597,14 @@ class PaperSession:
                 leg_index=o.leg_index)
         self.journal.log_event("entry_failed", {"why": why}, run_id=self.run_id,
                                ref_id=sig.signal_id)
+
+    def _snap(self, symbols: set[str], reason: str) -> None:
+        if self.snapshot is None or not symbols or self.replaying:
+            return
+        try:
+            self.snapshot(symbols, reason)
+        except Exception as exc:          # a recording failure never blocks a trade
+            log.warning("snapshot %s failed: %s", reason, exc)
 
     # -- exits -----------------------------------------------------------------------
 
@@ -674,6 +697,7 @@ class PaperSession:
                                                        "reason": reason},
                                    run_id=self.run_id, ref_id=pos.signal_id)
             return None
+        self._snap({leg["tradingsymbol"] for leg in legs}, "exit")
         charges = sum(self.broker.order_charges(o.order_id)
                       for o in self.journal.orders(pos.signal_id, status="COMPLETE"))
         gross = (exit_net - pos.entry_net) * pos.units
@@ -837,7 +861,9 @@ def run_paper(*, minutes: float = 375, events: list[str] | None = None, laya=Non
         book_for=recorder_book(recorder), lot_size_for=lot_size_resolver(store),
         vix=vix, equity=_equity(), evidence=load_evidence(journal), events=events,
         spot_age=spot_age, feed_ok=feed_ok, run_id=run_id, laya=laya,
-        laya_enforce=laya_enforce, on_entry=pin_entry)
+        laya_enforce=laya_enforce, on_entry=pin_entry,
+        snapshot=lambda symbols, reason: recorder.snapshot(
+            datetime.now(), reason=reason, symbols=symbols, with_depth=True))
     paper.replay(bars)
     last_ts = bars[-1][0].ts if bars else None
 

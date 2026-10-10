@@ -291,3 +291,79 @@ class TestAudit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestArchiveIdentityAndCoverage(unittest.TestCase):
+    def test_migrates_old_tables_keeping_rows(self):
+        import sqlite3
+
+        from data.kite.archive import MarketArchive
+        db = _db()
+        c = sqlite3.connect(db)
+        c.executescript("""
+        CREATE TABLE option_quotes (exchange TEXT NOT NULL, tradingsymbol TEXT NOT NULL,
+          captured_at TEXT NOT NULL, exchange_ts TEXT, spot REAL, ltp REAL, bid REAL,
+          bid_qty INTEGER, ask REAL, ask_qty INTEGER, depth_json TEXT DEFAULT '',
+          volume INTEGER, oi INTEGER, iv REAL,
+          reason TEXT NOT NULL DEFAULT 'periodic' CHECK(reason IN ('periodic','signal','fill','exit','open_snapshot')),
+          UNIQUE (exchange, tradingsymbol, captured_at));
+        INSERT INTO option_quotes (exchange, tradingsymbol, captured_at, bid, ask)
+          VALUES ('NFO', 'X', '2026-10-06T10:00:00', 1, 2);""")
+        c.commit()
+        c.close()
+        a = MarketArchive(db)
+        self.assertEqual(len(a.quotes("X")), 1)
+        from data.kite.archive import OptionQuote
+        a.add_quotes([OptionQuote("NFO", "X", "2026-10-06T15:20:00", bid=1, ask=2,
+                                  reason="close_snapshot", expiry="2026-10-13",
+                                  strike=25000.0, option_type="CE")])
+        q = a.quotes("X")[-1]
+        self.assertEqual((q.reason, q.expiry, q.strike, q.option_type),
+                         ("close_snapshot", "2026-10-13", 25000.0, "CE"))
+
+    def test_snapshot_windows(self):
+        from services.ob_record import snapshot_plan
+        self.assertEqual(snapshot_plan(datetime(2026, 10, 6, 9, 16), 60), (15.0, "open_snapshot"))
+        self.assertEqual(snapshot_plan(datetime(2026, 10, 6, 15, 20), 60), (15.0, "close_snapshot"))
+        self.assertEqual(snapshot_plan(datetime(2026, 10, 6, 12, 0), 60), (60, "periodic"))
+
+    def test_recorder_writes_contract_identity(self):
+        from data.kite.archive import MarketArchive
+        from data.kite.legs import LegRecorder
+        from data.kite.store import InstrumentStore
+        store = InstrumentStore(_db())
+        _master(store)
+        a = MarketArchive(_db())
+        rec = LegRecorder(store, a, wings=1)
+        rec.plan(25000.0, today="2026-10-06")
+        opt = next(leg for leg in rec.legs.values() if leg.kind == "PE")
+        ts = datetime(2026, 10, 6, 10, 0, 1, tzinfo=IST)
+        depth = {"buy": [{"price": 50.0, "quantity": 65}], "sell": [{"price": 51.0, "quantity": 65}]}
+        rec.on_ticks([{"token": 256265, "ltp": 25000.0, "exchange_ts": ts},
+                      {"token": opt.token, "ltp": 50.5, "exchange_ts": ts, "depth": depth}])
+        rec.snapshot(datetime(2026, 10, 6, 10, 0, 2), reason="signal", with_depth=True)
+        q = a.quotes(opt.tradingsymbol)[0]
+        self.assertEqual((q.expiry, q.strike, q.option_type, q.reason),
+                         (opt.expiry, opt.strike, "PE", "signal"))
+        self.assertIn("buy", q.depth_json)
+
+    def test_coverage_report_flags_missing_sessions_and_positions(self):
+        from data.kite.archive import MarketArchive, OptionQuote
+        from journal.ob_db import ObJournal, PositionRecord
+        from services.ob_audit import coverage_report
+        db = _db()
+        a, j = MarketArchive(db), ObJournal(db)
+        a.add_quotes([OptionQuote("NFO", "X", f"2026-10-06T09:{m:02d}:05", bid=1, ask=1.1,
+                                  reason="open_snapshot" if m < 20 else "periodic",
+                                  expiry="2026-10-13", strike=1.0, option_type="CE")
+                      for m in range(15, 45)])
+        j.open_position(PositionRecord("P1", "S1", "intraday", "long_call", 1, 65, 1.1, 0, 2,
+                                       "2026-10-06T09:30:00", legs_json='[{"tradingsymbol": "X", "qty": 1}]'))
+        rows = coverage_report(a, j, days=1, now=datetime(2026, 10, 6, 16, 0))
+        today = rows[-1]
+        self.assertEqual(today["session"], "2026-10-06")
+        self.assertTrue(today["open_ok"])
+        self.assertFalse(today["close_ok"])
+        self.assertEqual(today["minute_coverage"], round(30 / 375, 3))
+        self.assertTrue(today["positions"][0]["entry_quote"])
+        self.assertEqual(rows[0]["rows"], 0)          # the previous session had nothing

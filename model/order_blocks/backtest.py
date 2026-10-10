@@ -92,6 +92,7 @@ class Trade:
     score: float = 0.0
     zone_id: str = ""
     htf_trend: str = "none"
+    available_at: datetime | None = None
     exit_ts: datetime | None = None
     exit: float | None = None
     reason: str = ""
@@ -140,6 +141,9 @@ def simulate(trade: Trade, book: _Book, cost_points: float) -> Trade | None:
         return None
     bars = book.bars
     first = bars[i]
+    if trade.available_at is not None and first.ts < trade.available_at:
+        from model.order_blocks.types import LookAheadError
+        raise LookAheadError(f"fill at {first.ts} before data available at {trade.available_at}")
     if first.ts.date() != trade.trigger_ts.date() and trade.horizon == "intraday":
         return None
     entry = first.open
@@ -194,9 +198,11 @@ OVERNIGHT_FILL_DELAY = timedelta(minutes=5)
 def _trade_from_setup(s: Setup, arm: str = "OB") -> Trade:
     entry_ts = s.trigger_ts + (OVERNIGHT_FILL_DELAY if s.horizon == "overnight"
                                else timedelta(0))
-    return Trade(arm, s.horizon, s.plan.direction, s.trigger_ts.date().isoformat(),
-                 s.trigger_ts, entry_ts, s.plan.u_entry, s.plan.u_stop,
-                 s.plan.u_target, s.score.total, s.zone.zone_id, s.htf_trend)
+    t = Trade(arm, s.horizon, s.plan.direction, s.trigger_ts.date().isoformat(),
+              s.trigger_ts, entry_ts, s.plan.u_entry, s.plan.u_stop,
+              s.plan.u_target, s.score.total, s.zone.zone_id, s.htf_trend)
+    t.available_at = s.available_at
+    return t
 
 
 # ---------------------------------------------------------------------------

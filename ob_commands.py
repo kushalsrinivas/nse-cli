@@ -88,6 +88,32 @@ def cmd_ob_record(args) -> int:
     return 0
 
 
+def cmd_ob_coverage(args) -> int:
+    from data.kite.archive import MarketArchive
+    from journal.ob_db import ObJournal
+    from services.ob_audit import coverage_report
+
+    rows = coverage_report(MarketArchive(), ObJournal(), days=args.days)
+    table = Table(title="Option-quote archive coverage")
+    for col in ("Session", "Rows", "Legs", "Minutes", "Open", "Close", "Signal snaps",
+                "Identity", "Positions w/o quotes"):
+        table.add_column(col)
+    gaps = 0
+    for r in rows:
+        missing = [p["position_id"] for p in r["positions"]
+                   if not p["entry_quote"] or p["exit_quote"] is False]
+        gaps += 1 if (r["rows"] == 0 or missing) else 0
+        ok = lambda b: "[green]yes[/]" if b else "[red]no[/]"   # noqa: E731
+        table.add_row(r["session"], str(r["rows"]), str(r["contracts"]),
+                      f"{r['minute_coverage']:.0%}", ok(r["open_ok"]), ok(r["close_ok"]),
+                      str(r["signal_snaps"]), f"{r['with_identity']:.0%}",
+                      ", ".join(missing) or "—")
+    console.print(table)
+    console.print("[dim]Run `model_cli.py ob-record` (or ob-paper) every session; "
+                  "see scripts/ob-cron.example[/]")
+    return 1 if gaps else 0
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -113,7 +139,11 @@ def register(sub) -> dict:
                     help="quote snapshot interval in seconds (default 60)")
     rc.add_argument("--verbose", action="store_true")
 
+    cv = sub.add_parser("ob-coverage", help="per-session option quote coverage (exit 1 on gaps)")
+    cv.add_argument("--days", type=int, default=10)
+
     cmds = {
+        "ob-coverage": cmd_ob_coverage,
         "ob-audit": cmd_ob_audit,
         "ob-backfill": cmd_ob_backfill,
         "ob-record": cmd_ob_record,

@@ -1,0 +1,17 @@
+# Order-block data collection — crontab example (IST). Adjust paths.
+# The options archive only grows on days the recorder runs: Kite does not serve
+# expired option history, so a missed session is lost for good.
+#
+#   crontab -e   then paste with your paths:
+#
+# m  h   dom mon dow  command
+  50 7   *   *   1-5  cd ~/nse-cli && .venv/bin/python model_cli.py kite-master      >> logs/ob.log 2>&1
+# 09:10 — one of these two (ob-paper records everything ob-record does):
+  10 9   *   *   1-5  cd ~/nse-cli && .venv/bin/python model_cli.py ob-paper        >> logs/ob.log 2>&1
+# 10 9   *   *   1-5  cd ~/nse-cli && .venv/bin/python model_cli.py ob-record       >> logs/ob.log 2>&1
+  25 15  *   *   1-5  cd ~/nse-cli && .venv/bin/python model_cli.py archive-chain --expiries 2 >> logs/ob.log 2>&1
+  0  16  *   *   1-5  cd ~/nse-cli && .venv/bin/python model_cli.py ob-backfill --days 3 --options >> logs/ob.log 2>&1
+  10 16  *   *   1-5  cd ~/nse-cli && .venv/bin/python model_cli.py ob-coverage --days 1 >> logs/ob.log 2>&1
+#
+# The Kite session must be refreshed each morning (`model_cli.py kite-login`);
+# it expires at 06:00 IST and every job above fails loudly without it.

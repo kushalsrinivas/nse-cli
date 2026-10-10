@@ -23,6 +23,10 @@ BULLISH = "bullish"
 BEARISH = "bearish"
 
 
+class LookAheadError(RuntimeError):
+    """A decision or bar would use data that was not yet available."""
+
+
 def short_hash(*parts) -> str:
     return hashlib.sha1("|".join(str(p) for p in parts).encode()).hexdigest()[:16]
 
@@ -165,6 +169,9 @@ class Setup:
     htf_trend: str
     atr: float
     notes: list[str] = field(default_factory=list)
+    #: When every input to this setup was settled and visible: the end of the
+    #: 1m bar that completed the trigger bar. Nothing may act before it.
+    available_at: datetime | None = None
 
     @property
     def signal_key(self) -> str:
