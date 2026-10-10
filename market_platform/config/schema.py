@@ -48,6 +48,11 @@ class UniverseConfig:
     min_adv_value_cr: float = 25.0
     max_instruments: int = 1500
     refresh_hours: int = 24
+    #: a live session refuses to start when a configured index's membership was
+    #: last validated longer ago than this, or its latest file was rejected/missing
+    max_membership_age_days: int = 7
+    #: explicit override of that refusal (the run is then labelled STALE_UNIVERSE)
+    allow_stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -286,6 +291,7 @@ RANGES: dict[str, dict] = {
     "universe.min_adv_value_cr": _rng(0, 100_000, "₹ crore"),
     "universe.max_instruments": _rng(1, 9000),
     "universe.refresh_hours": _rng(1, 24 * 14),
+    "universe.max_membership_age_days": _rng(1, 120, "days"),
     "data.candle_grace_sec": _rng(0, 30, "s"),
     "data.stale_after_sec": _rng(5, 3600, "s"),
     "data.quote_stale_after_sec": _rng(1, 300, "s"),

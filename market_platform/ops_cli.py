@@ -33,9 +33,16 @@ def cmd_run(args) -> int:
     rest = KiteRest()
     chains = None if args.no_options else KiteChainProvider(rest, store, d.market,
                                                             wings=cfg.data.index_ladder_wings)
-    runner = PaperRunner(cfg, d, store=store, api_key=api_key, access_token=token, rest=rest,
-                         chain_provider=chains, calendar=_calendar(d),
-                         kill_switch=kill_switch.is_engaged)
+    from market_platform.runner import UniverseNotReady
+    try:
+        runner = PaperRunner(cfg, d, store=store, api_key=api_key, access_token=token, rest=rest,
+                             chain_provider=chains, calendar=_calendar(d),
+                             kill_switch=kill_switch.is_engaged)
+    except UniverseNotReady as exc:
+        console.print(f"[red]universe not ready — refusing to start:[/] {exc}\n"
+                      "Fix with `platform_cli.py universe refresh` (see `universe validate`), or set "
+                      "universe.allow_stale = true to run on it knowingly.")
+        return 2
     if not runner.instruments:
         console.print("[red]empty universe — run `platform_cli.py universe refresh`[/]")
         return 2
@@ -63,13 +70,16 @@ def cmd_load(args) -> int:
                          "paths": {**json.loads(base.canonical())["paths"],
                                    "app_db": str(tmp / "app.db"), "market_db": str(tmp / "market.db")}})
         d = Databases.from_config(cfg, tmp)
-        r = asyncio.run(run_load(cfg, d, tokens=args.tokens, minutes=args.minutes, ticks_per_sec=m))
+        r = asyncio.run(run_load(cfg, d, tokens=args.tokens, minutes=args.minutes, ticks_per_sec=m,
+                                 warm_sessions=args.warm_sessions))
         r["mult"] = m
         out.append(r)
         console.print(f"{m:g}×: ingest {r['ingest_ticks_per_sec']:,} ticks/s "
                       f"(headroom {r['slo']['ingest_headroom_x']}×) · settle p99 {r['settle_ms']['p99']} ms · "
                       f"pipeline p99 {r['pipeline_ms']['p99']} ms · writer commit p99 "
-                      f"{r['writer']['commit_ms_p99']} ms · peak {r['memory_mb']['peak']} MB")
+                      f"{r['writer']['commit_ms_p99']} ms · RSS {r['memory_mb']['process_rss_end']} MB "
+                      f"(peak {r['memory_mb']['process_peak_rss']} MB, structure state "
+                      f"{r['memory_mb']['structure_state_per_instrument_kb']} KB/instrument)")
         d.close()
     path = write(out, ROOT / base.paths.reports_dir / "load")
     console.print(f"results: {path}")
@@ -119,6 +129,8 @@ def register(sub) -> dict:
     lt.add_argument("--tokens", type=int, default=1500)
     lt.add_argument("--minutes", type=int, default=16)
     lt.add_argument("--mult", default="1,2,4")
+    lt.add_argument("--warm-sessions", type=int, default=25,
+                    help="sessions of synthetic history per instrument first (steady-state memory)")
     dc = sub.add_parser("daily-check", help="quality + coverage + live-vs-replay reconcile + health")
     dc.add_argument("--date", default=None)
     dc.add_argument("--run", default=None)

@@ -19,7 +19,14 @@ Measured per simulated minute:
     pipeline_ms            from the minute's candles to all bus queues drained
                            (structure + signals + risk for every instrument)
     writer                 rows committed, commit p99, queue high-water
-    memory                 tracemalloc current / peak
+    memory                 process RSS (VmRSS) and peak RSS (VmHWM) from /proc, plus the
+                           structure-engine state alone (RSS growth while warming)
+
+Steady state: with `warm_sessions` ≥ 25 every instrument's structure engine
+is first fed that many sessions of synthetic 1m bars, so its bounded rings are
+full and memory reflects a running platform. A fresh run (warm_sessions=0)
+only holds the few minutes of state it has seen — that is why a 16-minute
+fresh run reports far less memory than the per-instrument steady state.
 Results are written to reports/load/ and quoted in docs/PLATFORM.md.
 """
 
@@ -82,8 +89,45 @@ async def _drain(bus, timeout: float = 30.0) -> None:
                 return
 
 
+def rss_mb() -> dict:
+    """Process resident memory from /proc (Linux); empty elsewhere."""
+    out = {}
+    try:
+        for line in open("/proc/self/status"):
+            if line.startswith(("VmRSS", "VmHWM")):
+                k, v = line.split(":")
+                out[k] = round(int(v.split()[0]) / 1024, 1)
+    except OSError:
+        pass
+    return {"rss": out.get("VmRSS"), "peak_rss": out.get("VmHWM")}
+
+
+def _warm(layer, keys: list[str], sessions: int, seed: int) -> int:
+    """Synthetic history so every instrument's structure engine is at steady state."""
+    from model.order_blocks.types import Bar
+    rng = random.Random(seed)
+    day = datetime(2026, 8, 3, 9, 15)
+    px = {k: 1000.0 + rng.random() * 2000 for k in keys}
+    n = done = 0
+    while done < sessions:
+        if day.weekday() < 5:
+            for i in range(375):
+                ts = day + timedelta(minutes=i)
+                minute = {}
+                for k in keys:
+                    o = px[k]
+                    c = o * (1 + rng.gauss(0, 0.0012) + (0.0004 if (i // 50) % 2 else -0.0004))
+                    minute[k] = Bar(ts, "1m", o, max(o, c) * 1.0005, min(o, c) * 0.9995, c,
+                                    rng.randint(500, 3000))
+                    px[k] = c
+                n += layer.warm(minute)
+            done += 1
+        day += timedelta(days=1)
+    return n
+
+
 async def run_load(cfg, dbs, *, tokens: int, minutes: int, ticks_per_sec: float,
-                   start: datetime | None = None, seed: int = 1) -> dict:
+                   start: datetime | None = None, seed: int = 1, warm_sessions: int = 0) -> dict:
     from market_platform.marketdata.stream import DataPlane
     from market_platform.portfolio.book import Portfolio
     from market_platform.risk.desk import TradingDesk
@@ -100,6 +144,9 @@ async def run_load(cfg, dbs, *, tokens: int, minutes: int, ticks_per_sec: float,
                         store=SignalStore(dbs.app), run_id="load", strategy_version="load")
     desk = TradingDesk(cfg, dbs.app, Portfolio(cfg.risk.equity_rupees, run_id="load"),
                        instruments={i["instrument_key"]: i for i in inst}, run_id="load")
+    mem_start = rss_mb()
+    warmed = _warm(layer, [i["instrument_key"] for i in inst], warm_sessions, seed) if warm_sessions else 0
+    mem_warm = rss_mb()
     await dp.start(recover=False)
     tasks = [asyncio.create_task(layer.run(dp.bus)), asyncio.create_task(desk.run(dp.bus))]
     for t in dp._tasks:                        # the harness drives the clock itself
@@ -163,7 +210,16 @@ async def run_load(cfg, dbs, *, tokens: int, minutes: int, ticks_per_sec: float,
                    "backpressure_waits": w.backpressure_waits},
         "bus_high_water": {s["name"]: s["high_water"] for s in dp.bus.stats()},
         "signals": layer.stats()["structure"]["setups"],
-        "memory_mb": {"current": round(cur / 1e6, 1), "peak": round(peak / 1e6, 1)},
+        "memory_mb": {
+            "process_rss_start": mem_start["rss"], "process_rss_after_warmup": mem_warm["rss"],
+            "process_rss_end": rss_mb()["rss"], "process_peak_rss": rss_mb()["peak_rss"],
+            "structure_state_total": round((mem_warm["rss"] or 0) - (mem_start["rss"] or 0), 1)
+            if warm_sessions else None,
+            "structure_state_per_instrument_kb": round(((mem_warm["rss"] or 0) - (mem_start["rss"] or 0))
+                                                       * 1024 / tokens, 1) if warm_sessions else None,
+            "warm_sessions": warm_sessions, "warm_bars": warmed,
+            "traced_during_session_current": round(cur / 1e6, 1),
+            "traced_during_session_peak": round(peak / 1e6, 1)},
         "slo": {
             # sustained capacity ÷ offered tick rate (must stay > 1 with margin)
             "ingest_headroom_x": round(ticks / ingest_s / (tokens * ticks_per_sec), 1)

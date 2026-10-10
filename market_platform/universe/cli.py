@@ -49,7 +49,10 @@ def cmd_universe(args) -> int:
                     console.print(f"  {ix:34} {r['members']:4} members  +{len(r['added'])} "
                                   f"-{len(r['removed'])}")
                 else:
-                    console.print(f"  {ix:34} [red]missing[/] (kept {r['kept_previous']} previous)")
+                    console.print(f"  {ix:34} [red]{r['status'].upper()}[/] — kept {r['kept_previous']} "
+                                  "previous members (nothing from this file was applied)")
+                for issue in r.get("issues", []):
+                    console.print(f"      {'[red]' if issue.startswith('BLOCK') else '[yellow]'}{issue}[/]")
             bad = {k: v for k, v in rep["coverage"].items() if not v["ok"]}
             for ix, c in bad.items():
                 console.print(f"  [yellow]{ix}: {c['resolved']}/{c['members']} resolved to tokens[/]")
@@ -59,7 +62,20 @@ def cmd_universe(args) -> int:
                 console.print(f"  [dim]{len(rep['unknown_master_indices'])} master indices not in "
                               f"the catalogue (see conf/universe/index_catalogue.csv)[/]")
             missing = any(r["status"] != "ok" for r in rep["indices"].values())
+            ready = svc.readiness(today=rep["as_of"])
+            console.print("[green]ready for a live session[/]" if ready["ok"] else
+                           "[red]NOT ready for a live session[/] — `platform_cli.py universe validate`")
             return 1 if (bad or missing) else 0
+        if args.action == "validate":
+            ready = svc.readiness()
+            for p in ready["problems"]:
+                console.print(f"  [red]{p}[/]")
+            for r in svc.app.execute("SELECT * FROM index_refresh ORDER BY index_id"):
+                console.print(f"  {r['index_id']:34} {r['last_status']:9} last ok {r['last_ok']} "
+                              f"· tried {r['last_try']} · {r['source']}")
+            console.print("[green]ready[/]" if ready["ok"] else
+                          f"[red]not ready[/] (allow_stale={svc.cfg.universe.allow_stale})")
+            return 0 if ready["ok"] else 1
         if args.action == "show":
             rows = svc.instruments(args.snapshot, index=args.index, sector=args.sector,
                                    fno=True if args.fno else None)
@@ -116,7 +132,7 @@ def cmd_universe(args) -> int:
 def register(sub) -> dict:
     u = sub.add_parser("universe", help="instrument universe: refresh, show, diff, export")
     u.add_argument("action", choices=("refresh", "show", "coverage", "diff", "export", "members",
-                                      "import-history", "tree"))
+                                      "import-history", "tree", "validate"))
     u.add_argument("args", nargs="*")
     u.add_argument("--as-of", default=None)
     u.add_argument("--snapshot", default=None)

@@ -32,6 +32,10 @@ IST = ZoneInfo("Asia/Kolkata")
 SESSION_END = time(15, 35)
 
 
+class UniverseNotReady(RuntimeError):
+    """The universe failed validation or is stale; see `universe validate`."""
+
+
 class PaperRunner:
     def __init__(self, cfg, dbs, *, store, api_key: str = "", access_token: str = "", rest=None,
                  ws_class=None, chain_provider=None, calendar=None, kill_switch=None,
@@ -41,10 +45,16 @@ class PaperRunner:
         self.now_fn = now_fn or (lambda: datetime.now(tz=IST))
         svc = UniverseService(dbs.app, dbs.market, cfg, store=store)
         self.snapshot = svc.latest_snapshot() or "none"
+        self.readiness = {"ok": True, "label": "PROVIDED", "problems": []}
+        if instruments is None:            # fail closed on stale / rejected / missing membership
+            self.readiness = svc.readiness(today=self.now_fn().date().isoformat())
+            if not self.readiness["allowed"]:
+                raise UniverseNotReady("; ".join(self.readiness["problems"][:5]))
         inst = instruments if instruments is not None else svc.instruments(tradable_only=True)
         self.instruments = {i["instrument_key"]: i for i in inst}
         self.run_id = start_run(dbs.app, dbs.market, cfg, kind="paper",
-                                universe_snapshot=self.snapshot, notes="live paper session")
+                                universe_snapshot=self.snapshot,
+                                notes=f"live paper session universe={self.readiness['label']}")
         self.data = DataPlane(cfg, dbs, store=store, api_key=api_key, access_token=access_token,
                               rest=rest, ws_class=ws_class, calendar=calendar, instruments=inst)
         meta = {r["index_id"]: dict(r) for r in dbs.app.execute("SELECT * FROM indices")}

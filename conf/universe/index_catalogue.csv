@@ -1,29 +1,29 @@
-index_id,name,exchange,category,sector,kite_symbol,deriv_candidate,constituents_url
-NSE:NIFTY 50,NIFTY 50,NSE,broad,,NIFTY 50,NIFTY,https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv
-NSE:NIFTY NEXT 50,NIFTY NEXT 50,NSE,broad,,NIFTY NEXT 50,NIFTYNXT50,https://www.niftyindices.com/IndexConstituent/ind_niftynext50list.csv
-NSE:NIFTY 100,NIFTY 100,NSE,broad,,NIFTY 100,,https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv
-NSE:NIFTY 200,NIFTY 200,NSE,broad,,NIFTY 200,,https://www.niftyindices.com/IndexConstituent/ind_nifty200list.csv
-NSE:NIFTY 500,NIFTY 500,NSE,broad,,NIFTY 500,,https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv
-NSE:NIFTY MIDCAP 150,NIFTY MIDCAP 150,NSE,broad,,NIFTY MIDCAP 150,,https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv
-NSE:NIFTY MIDCAP SELECT,NIFTY MIDCAP SELECT,NSE,broad,,NIFTY MID SELECT,MIDCPNIFTY,https://www.niftyindices.com/IndexConstituent/ind_niftymidcapselect_list.csv
-NSE:NIFTY SMALLCAP 250,NIFTY SMALLCAP 250,NSE,broad,,NIFTY SMLCAP 250,,https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv
-NSE:NIFTY BANK,NIFTY BANK,NSE,sector,Banks,NIFTY BANK,BANKNIFTY,https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv
-NSE:NIFTY FINANCIAL SERVICES,NIFTY FINANCIAL SERVICES,NSE,sector,Financial Services,NIFTY FIN SERVICE,FINNIFTY,https://www.niftyindices.com/IndexConstituent/ind_niftyfinancelist.csv
-NSE:NIFTY IT,NIFTY IT,NSE,sector,Information Technology,NIFTY IT,,https://www.niftyindices.com/IndexConstituent/ind_niftyitlist.csv
-NSE:NIFTY AUTO,NIFTY AUTO,NSE,sector,Automobile,NIFTY AUTO,,https://www.niftyindices.com/IndexConstituent/ind_niftyautolist.csv
-NSE:NIFTY FMCG,NIFTY FMCG,NSE,sector,FMCG,NIFTY FMCG,,https://www.niftyindices.com/IndexConstituent/ind_niftyfmcglist.csv
-NSE:NIFTY METAL,NIFTY METAL,NSE,sector,Metals & Mining,NIFTY METAL,,https://www.niftyindices.com/IndexConstituent/ind_niftymetallist.csv
-NSE:NIFTY PHARMA,NIFTY PHARMA,NSE,sector,Pharma,NIFTY PHARMA,,https://www.niftyindices.com/IndexConstituent/ind_niftypharmalist.csv
-NSE:NIFTY HEALTHCARE,NIFTY HEALTHCARE,NSE,sector,Healthcare,NIFTY HEALTHCARE,,https://www.niftyindices.com/IndexConstituent/ind_niftyhealthcarelist.csv
-NSE:NIFTY PSU BANK,NIFTY PSU BANK,NSE,sector,PSU Banks,NIFTY PSU BANK,,https://www.niftyindices.com/IndexConstituent/ind_niftypsubanklist.csv
-NSE:NIFTY PRIVATE BANK,NIFTY PRIVATE BANK,NSE,sector,Private Banks,NIFTY PVT BANK,,https://www.niftyindices.com/IndexConstituent/ind_nifty_privatebanklist.csv
-NSE:NIFTY REALTY,NIFTY REALTY,NSE,sector,Realty,NIFTY REALTY,,https://www.niftyindices.com/IndexConstituent/ind_niftyrealtylist.csv
-NSE:NIFTY MEDIA,NIFTY MEDIA,NSE,sector,Media,NIFTY MEDIA,,https://www.niftyindices.com/IndexConstituent/ind_niftymedialist.csv
-NSE:NIFTY ENERGY,NIFTY ENERGY,NSE,sector,Energy,NIFTY ENERGY,,https://www.niftyindices.com/IndexConstituent/ind_niftyenergylist.csv
-NSE:NIFTY OIL & GAS,NIFTY OIL & GAS,NSE,sector,Oil & Gas,NIFTY OIL AND GAS,,https://www.niftyindices.com/IndexConstituent/ind_niftyoilgaslist.csv
-NSE:NIFTY CONSUMER DURABLES,NIFTY CONSUMER DURABLES,NSE,sector,Consumer Durables,NIFTY CONSR DURBL,,https://www.niftyindices.com/IndexConstituent/ind_niftyconsumerdurableslist.csv
-NSE:NIFTY INFRASTRUCTURE,NIFTY INFRASTRUCTURE,NSE,thematic,Infrastructure,NIFTY INFRA,,https://www.niftyindices.com/IndexConstituent/ind_niftyinfralist.csv
-NSE:NIFTY COMMODITIES,NIFTY COMMODITIES,NSE,thematic,Commodities,NIFTY COMMODITIES,,https://www.niftyindices.com/IndexConstituent/ind_niftycommoditieslist.csv
-NSE:NIFTY CPSE,NIFTY CPSE,NSE,thematic,CPSE,NIFTY CPSE,,https://www.niftyindices.com/IndexConstituent/ind_niftycpselist.csv
-BSE:SENSEX,SENSEX,BSE,broad,,SENSEX,SENSEX,manual
-BSE:BANKEX,BANKEX,BSE,sector,Banks,BANKEX,BANKEX,manual
+index_id,name,exchange,category,sector,kite_symbol,deriv_candidate,constituents_url,expected_members
+NSE:NIFTY 50,NIFTY 50,NSE,broad,,NIFTY 50,NIFTY,https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv,50-50
+NSE:NIFTY NEXT 50,NIFTY NEXT 50,NSE,broad,,NIFTY NEXT 50,NIFTYNXT50,https://www.niftyindices.com/IndexConstituent/ind_niftynext50list.csv,50-50
+NSE:NIFTY 100,NIFTY 100,NSE,broad,,NIFTY 100,,https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv,100-100
+NSE:NIFTY 200,NIFTY 200,NSE,broad,,NIFTY 200,,https://www.niftyindices.com/IndexConstituent/ind_nifty200list.csv,200-200
+NSE:NIFTY 500,NIFTY 500,NSE,broad,,NIFTY 500,,https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv,495-505
+NSE:NIFTY MIDCAP 150,NIFTY MIDCAP 150,NSE,broad,,NIFTY MIDCAP 150,,https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv,148-152
+NSE:NIFTY MIDCAP SELECT,NIFTY MIDCAP SELECT,NSE,broad,,NIFTY MID SELECT,MIDCPNIFTY,https://www.niftyindices.com/IndexConstituent/ind_niftymidcapselect_list.csv,25-25
+NSE:NIFTY SMALLCAP 250,NIFTY SMALLCAP 250,NSE,broad,,NIFTY SMLCAP 250,,https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv,247-253
+NSE:NIFTY BANK,NIFTY BANK,NSE,sector,Banks,NIFTY BANK,BANKNIFTY,https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv,10-15
+NSE:NIFTY FINANCIAL SERVICES,NIFTY FINANCIAL SERVICES,NSE,sector,Financial Services,NIFTY FIN SERVICE,FINNIFTY,https://www.niftyindices.com/IndexConstituent/ind_niftyfinancelist.csv,18-22
+NSE:NIFTY IT,NIFTY IT,NSE,sector,Information Technology,NIFTY IT,,https://www.niftyindices.com/IndexConstituent/ind_niftyitlist.csv,8-12
+NSE:NIFTY AUTO,NIFTY AUTO,NSE,sector,Automobile,NIFTY AUTO,,https://www.niftyindices.com/IndexConstituent/ind_niftyautolist.csv,13-17
+NSE:NIFTY FMCG,NIFTY FMCG,NSE,sector,FMCG,NIFTY FMCG,,https://www.niftyindices.com/IndexConstituent/ind_niftyfmcglist.csv,13-17
+NSE:NIFTY METAL,NIFTY METAL,NSE,sector,Metals & Mining,NIFTY METAL,,https://www.niftyindices.com/IndexConstituent/ind_niftymetallist.csv,13-17
+NSE:NIFTY PHARMA,NIFTY PHARMA,NSE,sector,Pharma,NIFTY PHARMA,,https://www.niftyindices.com/IndexConstituent/ind_niftypharmalist.csv,18-22
+NSE:NIFTY HEALTHCARE,NIFTY HEALTHCARE,NSE,sector,Healthcare,NIFTY HEALTHCARE,,https://www.niftyindices.com/IndexConstituent/ind_niftyhealthcarelist.csv,18-22
+NSE:NIFTY PSU BANK,NIFTY PSU BANK,NSE,sector,PSU Banks,NIFTY PSU BANK,,https://www.niftyindices.com/IndexConstituent/ind_niftypsubanklist.csv,10-14
+NSE:NIFTY PRIVATE BANK,NIFTY PRIVATE BANK,NSE,sector,Private Banks,NIFTY PVT BANK,,https://www.niftyindices.com/IndexConstituent/ind_nifty_privatebanklist.csv,9-11
+NSE:NIFTY REALTY,NIFTY REALTY,NSE,sector,Realty,NIFTY REALTY,,https://www.niftyindices.com/IndexConstituent/ind_niftyrealtylist.csv,8-12
+NSE:NIFTY MEDIA,NIFTY MEDIA,NSE,sector,Media,NIFTY MEDIA,,https://www.niftyindices.com/IndexConstituent/ind_niftymedialist.csv,8-12
+NSE:NIFTY ENERGY,NIFTY ENERGY,NSE,sector,Energy,NIFTY ENERGY,,https://www.niftyindices.com/IndexConstituent/ind_niftyenergylist.csv,10-60
+NSE:NIFTY OIL & GAS,NIFTY OIL & GAS,NSE,sector,Oil & Gas,NIFTY OIL AND GAS,,https://www.niftyindices.com/IndexConstituent/ind_niftyoilgaslist.csv,13-17
+NSE:NIFTY CONSUMER DURABLES,NIFTY CONSUMER DURABLES,NSE,sector,Consumer Durables,NIFTY CONSR DURBL,,https://www.niftyindices.com/IndexConstituent/ind_niftyconsumerdurableslist.csv,13-17
+NSE:NIFTY INFRASTRUCTURE,NIFTY INFRASTRUCTURE,NSE,thematic,Infrastructure,NIFTY INFRA,,https://www.niftyindices.com/IndexConstituent/ind_niftyinfralist.csv,25-35
+NSE:NIFTY COMMODITIES,NIFTY COMMODITIES,NSE,thematic,Commodities,NIFTY COMMODITIES,,https://www.niftyindices.com/IndexConstituent/ind_niftycommoditieslist.csv,25-35
+NSE:NIFTY CPSE,NIFTY CPSE,NSE,thematic,CPSE,NIFTY CPSE,,https://www.niftyindices.com/IndexConstituent/ind_niftycpselist.csv,8-14
+BSE:SENSEX,SENSEX,BSE,broad,,SENSEX,SENSEX,manual,30-30
+BSE:BANKEX,BANKEX,BSE,sector,Banks,BANKEX,BANKEX,manual,8-12

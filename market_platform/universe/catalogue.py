@@ -35,12 +35,21 @@ class IndexInfo:
     kite_symbol: str = ""
     deriv_candidate: str = ""
     constituents_url: str = ""    # URL, 'manual' or ''
+    expected_members: tuple[int, int] | None = None   # (lo, hi) accepted member count
     kite_token: int | None = None
     deriv_underlying: str | None = None
 
     @property
     def instrument_key(self) -> str:
         return f"{self.exchange}:{self.kite_symbol or self.name}"
+
+
+def _range(v: str | None) -> tuple[int, int] | None:
+    v = (v or "").strip()
+    if not v:
+        return None
+    lo, _, hi = v.partition("-")
+    return int(lo), int(hi or lo)
 
 
 def load_catalogue(path: str | Path = DEFAULT_CATALOGUE) -> list[IndexInfo]:
@@ -60,7 +69,8 @@ def load_catalogue(path: str | Path = DEFAULT_CATALOGUE) -> list[IndexInfo]:
                 category=cat, sector=(row.get("sector") or "").strip(),
                 kite_symbol=(row.get("kite_symbol") or "").strip(),
                 deriv_candidate=(row.get("deriv_candidate") or "").strip(),
-                constituents_url=(row.get("constituents_url") or "").strip()))
+                constituents_url=(row.get("constituents_url") or "").strip(),
+                expected_members=_range(row.get("expected_members"))))
     return out
 
 
