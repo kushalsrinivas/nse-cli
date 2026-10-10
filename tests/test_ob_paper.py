@@ -413,3 +413,128 @@ class TestPaperSession(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdverseExecution(unittest.TestCase):
+    """Overnight exits when the open is hostile: gaps, missing and stale books."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {"KITE_CONFIG_DIR": self.d})
+        self.env.start()
+        os.environ.pop("OB_KILL", None)
+
+    def tearDown(self):
+        self.env.stop()
+
+    def _session(self, books, feed_ok=True):
+        import json
+
+        from execution.paper_broker import PaperBroker
+        from journal.ob_db import PositionRecord
+        from model.order_blocks.engine import ObEngine
+        from services.order_blocks import PaperSession
+        j = _journal()
+        clock = Clock(datetime(2026, 10, 7, 9, 15, 2))
+        broker = PaperBroker(j, books.get, clock=clock)
+        s = PaperSession(engine=ObEngine(), journal=j, broker=broker, chains=lambda: {},
+                         book_for=books.get, lot_size_for=lambda x: 65, vix=13.0,
+                         equity=1e6, feed_ok=lambda: feed_ok, clock=clock, expected_lot=65)
+        j.open_position(PositionRecord(
+            "P1", "SIG-ON", "overnight", "long_call", 2, 65, 150.0, 24940, 25150,
+            "2026-10-06T15:20:05", direction="bullish", risk_rupees=5000,
+            legs_json=json.dumps([{"tradingsymbol": "NIFTY25000CE", "qty": 1, "type": "CE",
+                                   "expiry": "2026-10-13", "strike": 25000}])))
+        return s, j, clock
+
+    def _bar(self, hh, mm, o, h, l, c):  # noqa: E741
+        from model.order_blocks.types import Bar
+        return Bar(datetime(2026, 10, 7, hh, mm), "1m", o, h, l, c)
+
+    def test_gap_with_missing_opening_book_retries_and_keeps_reason(self):
+        books = {}
+        s, j, clock = self._session(books)
+        s.manage(self._bar(9, 15, 24880, 24890, 24870, 24885))      # gapped below the 24940 stop
+        self.assertEqual(j.position("P1").status, "OPEN")            # no book yet → not filled
+        self.assertEqual(s.pending_exits["P1"][0], "gap")
+        books["NIFTY25000CE"] = _book("NIFTY25000CE", bid=96.0, ask=97.0)
+        clock.t = datetime(2026, 10, 7, 9, 16, 3)
+        s.manage(self._bar(9, 16, 24885, 24990, 24880, 24980))        # recovers above stop
+        p = j.position("P1")
+        self.assertEqual((p.status, p.exit_reason), ("CLOSED", "gap"))
+        self.assertEqual(p.exit_net, 96.0)                            # the open bid, not a stop price
+        attempts = [o.attempt for o in j.orders("SIG-ON") if o.purpose == "gap_exit"]
+        self.assertEqual(sorted(attempts), [0, 1])
+        self.assertLess(p.net_pnl, (96.0 - 150.0) * 130)              # charges on top
+
+    def test_stale_opening_quote_fills_with_penalty(self):
+        books = {"NIFTY25000CE": _book("NIFTY25000CE", bid=96.0, ask=97.0, age=30.0)}
+        s, j, _ = self._session(books)
+        s.manage(self._bar(9, 15, 24880, 24890, 24870, 24885))
+        p = j.position("P1")
+        self.assertEqual(p.exit_net, 95.95)                           # bid minus one tick
+        fills = [f for o in j.orders("SIG-ON") for f in j.fills(o.order_id)]
+        self.assertEqual(fills[0].fill_model, "gap_open")
+        self.assertEqual(fills[0].book_age_sec, 30.0)
+
+    def test_thin_opening_book_walks_depth(self):
+        books = {"NIFTY25000CE": _book("NIFTY25000CE", bid=96.0, ask=97.0,
+                                       bids=[(96.0, 65), (95.0, 30)])}
+        s, j, _ = self._session(books)
+        s.manage(self._bar(9, 15, 24880, 24890, 24870, 24885))
+        p = j.position("P1")
+        # 65 @ 96, 30 @ 95, remaining 35 @ 94.95 → average well below the top bid
+        self.assertAlmostEqual(p.exit_net, (65 * 96 + 30 * 95 + 35 * 94.95) / 130, places=3)
+
+    def test_reconnect_blocks_new_entries(self):
+        from execution.governor import BookState
+        from model.order_blocks.params import ObParams
+        from model.order_blocks.score import score_zone
+        from model.order_blocks.types import Setup, TradePlan, Zone
+        from services.order_blocks import Context, evaluate
+        now = datetime(2026, 10, 6, 11, 0)
+        z = Zone("z", "S", "15m", "bullish", now, now, now, 24950, 24990, 25100, now, 24940,
+                 40, 1.2, 1.8, 1.4)
+        s = Setup(z, "intraday", now, TradePlan("bullish", "intraday", 25000, 24940, 25150, "swing"),
+                  score_zone(z, "up", ObParams()), "up", 40, available_at=now)
+        ev = evaluate(s, Context(now, 25000, 13.0, feed_ok=False, spot_age_sec=2.0),
+                      chains={}, lot_size_for=lambda x: 65, book=BookState(equity=1e6),
+                      expected_lot=65)
+        gate = next(c for c in ev.checks if c.name == "Feed healthy")
+        self.assertEqual(gate.status.value, "fail")
+        self.assertEqual(ev.decision, "NO-GO")
+
+    def test_order_retry_after_rejection_but_not_after_fill(self):
+        from execution.paper_broker import PaperBroker
+        books = {}
+        j = _journal()
+        b = PaperBroker(j, books.get, clock=Clock(datetime(2026, 10, 7, 9, 15)))
+        kw = dict(tradingsymbol="X", transaction_type="SELL", quantity=65, product="NRML",
+                  order_type="MARKET", signal_id="S", purpose="gap_exit", leg_index=0)
+        first = b.place_order(**kw)
+        books["X"] = _book("X")
+        second = b.place_order(**kw)
+        third = b.place_order(**kw)
+        self.assertNotEqual(first, second)
+        self.assertEqual(second, third)                               # filled → idempotent again
+        self.assertEqual([o.status for o in j.orders("S")], ["REJECTED", "COMPLETE"])
+
+    def test_old_orders_table_is_migrated(self):
+        import sqlite3
+
+        from journal.ob_db import ObJournal
+        path = os.path.join(tempfile.mkdtemp(), "old.db")
+        c = sqlite3.connect(path)
+        c.executescript("""CREATE TABLE ob_paper_orders (order_id TEXT PRIMARY KEY, signal_id TEXT NOT NULL,
+          tag TEXT NOT NULL, leg_index INTEGER NOT NULL, exchange TEXT NOT NULL DEFAULT 'NFO',
+          tradingsymbol TEXT NOT NULL, transaction_type TEXT NOT NULL, product TEXT NOT NULL,
+          order_type TEXT NOT NULL, quantity INTEGER NOT NULL, price REAL, trigger_price REAL,
+          purpose TEXT NOT NULL, status TEXT NOT NULL, filled_qty INTEGER NOT NULL DEFAULT 0,
+          avg_price REAL, status_message TEXT DEFAULT '', placed_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL, UNIQUE (tag, purpose, leg_index));
+          INSERT INTO ob_paper_orders VALUES ('PO-1','S','T',0,'NFO','X','SELL','NRML','MARKET',65,
+          NULL,NULL,'gap_exit','REJECTED',0,NULL,'no book','t','t');""")
+        c.commit()
+        c.close()
+        j = ObJournal(path)
+        self.assertEqual(j.orders("S")[0].attempt, 0)

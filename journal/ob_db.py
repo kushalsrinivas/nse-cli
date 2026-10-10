@@ -115,7 +115,8 @@ CREATE TABLE IF NOT EXISTS ob_paper_orders (
     status_message TEXT DEFAULT '',
     placed_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE (tag, purpose, leg_index)
+    attempt INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (tag, purpose, leg_index, attempt)
 );
 
 CREATE TABLE IF NOT EXISTS ob_paper_fills (
@@ -258,6 +259,7 @@ class OrderRecord:
     filled_qty: int = 0
     avg_price: float | None = None
     status_message: str = ""
+    attempt: int = 0
 
 
 @dataclass
@@ -336,6 +338,16 @@ class ObJournal:
         have = {r[1] for r in self.conn.execute("PRAGMA table_info(ob_signals)")}
         if "available_at" not in have:
             self.conn.execute("ALTER TABLE ob_signals ADD COLUMN available_at TEXT")
+            self.conn.commit()
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(ob_paper_orders)")]
+        if "attempt" not in cols:
+            # The UNIQUE key changed, which SQLite cannot alter: rebuild.
+            self.conn.execute("ALTER TABLE ob_paper_orders RENAME TO ob_paper_orders_old")
+            self.conn.executescript(_SCHEMA)
+            names = ", ".join(cols)
+            self.conn.execute(f"INSERT INTO ob_paper_orders ({names}) "
+                              f"SELECT {names} FROM ob_paper_orders_old")
+            self.conn.execute("DROP TABLE ob_paper_orders_old")
             self.conn.commit()
 
     # -- generic -------------------------------------------------------------
@@ -433,13 +445,24 @@ class ObJournal:
     # -- orders / fills -----------------------------------------------------------
 
     def add_order(self, rec: OrderRecord) -> tuple[OrderRecord, bool]:
-        """Idempotent on (tag, purpose, leg_index)."""
+        """Idempotent on (tag, purpose, leg_index) — except after a rejection.
+
+        A replay of an order that is OPEN or COMPLETE returns that order and
+        never fills twice. An order that was REJECTED (no book in the first
+        seconds after the open, a stale feed) must be retryable, or the
+        position it was closing could never close: the retry is stored as
+        the next `attempt` of the same key.
+        """
+        rows = [self._row(OrderRecord, r) for r in self.conn.execute(
+            "SELECT * FROM ob_paper_orders WHERE tag=? AND purpose=? AND leg_index=? "
+            "ORDER BY attempt", (rec.tag, rec.purpose, rec.leg_index))]
+        live = [o for o in rows if o.status in ("OPEN", "COMPLETE")]
+        if live:
+            return live[-1], False
+        rec.attempt = len(rows)
         if self._insert("ob_paper_orders", rec):
             return rec, True
-        row = self.conn.execute(
-            "SELECT * FROM ob_paper_orders WHERE tag=? AND purpose=? AND leg_index=?",
-            (rec.tag, rec.purpose, rec.leg_index)).fetchone()
-        return self._row(OrderRecord, row), False
+        return rows[-1], False
 
     def update_order(self, rec: OrderRecord) -> None:
         rec.updated_at = _now()

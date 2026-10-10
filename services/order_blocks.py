@@ -472,6 +472,8 @@ class PaperSession:
         #: snapshot(symbols, reason): record full depth for these legs now.
         #: Every decision, fill and exit leaves an executable-price trail.
         self.snapshot = snapshot
+        #: position_id -> (reason, trigger_side) of exits awaiting a fill
+        self.pending_exits: dict[str, tuple[str, str]] = {}
         self.replaying = False
         self.last_bar: Bar | None = None
         self.prev_close_mark: dict[str, float] = {}
@@ -649,8 +651,14 @@ class PaperSession:
                 if bar.end.time() == dtime(15, 30):
                     self.prev_close_mark[pos.position_id] = mark
                 self.journal.update_position(pos)
-            reason, side, = None, None
-            if kill_switch.is_engaged():
+            reason, side = None, None
+            pending = self.pending_exits.get(pos.position_id)
+            if pending is not None:
+                # An exit already decided but not yet filled (no executable
+                # book at that moment) is retried with its original reason;
+                # it is never re-labelled by later bars.
+                reason, side = pending
+            elif kill_switch.is_engaged():
                 reason, side = "kill", "clock"
             elif stale is not None and stale > STALE_FLATTEN_SEC and pos.horizon == "intraday":
                 reason, side = "stale", "clock"
@@ -693,10 +701,12 @@ class PaperSession:
                 continue
             exit_net += (1 if long else -1) * (o.avg_price or 0.0)
         if not filled:
+            self.pending_exits[pos.position_id] = (reason, trigger_side)
             self.journal.log_event("exit_incomplete", {"position_id": pos.position_id,
                                                        "reason": reason},
                                    run_id=self.run_id, ref_id=pos.signal_id)
             return None
+        self.pending_exits.pop(pos.position_id, None)
         self._snap({leg["tradingsymbol"] for leg in legs}, "exit")
         charges = sum(self.broker.order_charges(o.order_id)
                       for o in self.journal.orders(pos.signal_id, status="COMPLETE"))
