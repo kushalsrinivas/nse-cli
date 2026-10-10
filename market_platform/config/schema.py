@@ -148,6 +148,14 @@ class RiskConfig:
     max_entries_per_session: int = 6
     near_expiry_days: int = 2
     near_expiry_scale: float = 0.5
+    #: open positions allowed per correlated cluster (plan §7.3)
+    max_positions_per_cluster: int = 1
+    #: costs may not exceed this share of the planned reward
+    max_cost_frac_of_reward: float = 0.25
+    #: overnight cash/futures stress: per-unit loss = |entry − stop| × (1 + this)
+    overnight_gap_stress_mult: float = 0.5
+    #: order value may not exceed this share of 20-day average traded value
+    max_adv_participation_pct: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -199,6 +207,14 @@ class ExecutionConfig:
     tick: float = 0.05
     max_book_age_sec: float = 2.0
     freeze_qty_default: int = 1800
+    #: fill model when no depth is available: ltp ± this many bps
+    slippage_bps_default: float = 5.0
+    #: stale book (older than max_book_age_sec): extra penalty in bps
+    stale_book_penalty_bps: float = 10.0
+    intraday_exit: str = "15:15"
+    overnight_exit: str = "10:30"
+    #: equities with F&O: trade options instead of cash/futures when pricing succeeds
+    prefer_options_for_equities: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,6 +316,12 @@ RANGES: dict[str, dict] = {
     "risk.max_correlated_cluster_pct": _rng(0.05, 50, "%"),
     "risk.max_overnight_risk_pct": _rng(0, 50, "%"),
     "risk.max_premium_deploy_pct": _rng(1, 100, "%"),
+    "risk.max_positions_per_cluster": _rng(1, 50),
+    "risk.max_cost_frac_of_reward": _rng(0.01, 1.0),
+    "risk.overnight_gap_stress_mult": _rng(0, 5),
+    "risk.max_adv_participation_pct": _rng(0.01, 20, "%"),
+    "execution.slippage_bps_default": _rng(0, 200, "bps"),
+    "execution.stale_book_penalty_bps": _rng(0, 500, "bps"),
     "liquidity.max_spread_bps_equity": _rng(1, 500, "bps"),
     "liquidity.max_spread_frac_options": _rng(0.001, 0.5),
     "options.delta_lo": _rng(0.05, 0.95),
@@ -336,6 +358,9 @@ def cross_checks(cfg: PlatformConfig) -> list[str]:
         e.append("risk.max_risk_per_underlying_pct exceeds risk.max_aggregate_open_risk_pct")
     if r.max_daily_loss_pct < r.risk_per_trade_pct:
         e.append("risk.max_daily_loss_pct is below a single trade's risk")
+    for t in ("intraday_exit", "overnight_exit"):
+        if not _hhmm(getattr(cfg.execution, t)):
+            e.append(f"execution.{t} must be HH:MM")
     if cfg.options.delta_lo >= cfg.options.delta_hi:
         e.append("options.delta_lo must be < options.delta_hi")
     for name in ("bullish", "bearish"):

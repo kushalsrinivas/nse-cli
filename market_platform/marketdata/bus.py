@@ -74,10 +74,20 @@ class Bus:
         self._subs.setdefault(topic, []).append(sub)
         return sub
 
+    def subscribe_many(self, topics: tuple[str, ...], name: str, *, maxsize: int = 10_000,
+                       policy: str = "block") -> Subscription:
+        """One queue fed by several topics, in publish order (e.g. one
+        approver for both signal pipelines)."""
+        sub = self.subscribe(topics[0], name, maxsize=maxsize, policy=policy)
+        for t in topics[1:]:
+            self._subs.setdefault(t, []).append(sub)
+        sub.topic = "+".join(topics)
+        return sub
+
     def unsubscribe(self, sub: Subscription) -> None:
-        subs = self._subs.get(sub.topic, [])
-        if sub in subs:
-            subs.remove(sub)
+        for subs in self._subs.values():
+            if sub in subs:
+                subs.remove(sub)
 
     async def publish(self, topic: str, event) -> None:
         self.published[topic] = self.published.get(topic, 0) + 1

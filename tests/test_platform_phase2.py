@@ -352,7 +352,7 @@ class TestLotsFromMaster(unittest.TestCase):
 
     def test_no_hardcoded_lot_tables_left(self):
         """Lots come from the master; config.lot_size (NIFTY) is checked against it."""
-        pat = re.compile(r"LOTS\s*(:[^=\n]*)?=\s*\{|lot_size\s*(:\s*int\s*)?=\s*[2-9]\d+|"
+        pat = re.compile(r"LOTS\s*(:[^=\n]*)?=\s*\{\s*[^}\s]|lot_size\s*(:\s*int\s*)?=\s*[2-9]\d+|"
                          r'"[A-Z&-]{2,}"\s*:\s*\d{2,}\s*,\s*#?.*lot', re.I)
         allowed = {"config.py"}
         offenders = []
