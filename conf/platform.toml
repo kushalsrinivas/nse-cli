@@ -1,0 +1,35 @@
+# Multi-market order-block platform configuration.
+# Every key is validated at load (`platform_cli.py config check`); unknown
+# keys, out-of-range values and inconsistent limits refuse to start.
+# Run `platform_cli.py config describe` for every key, its default and range.
+# The canonical hash of this file's validated content is recorded on every run.
+
+[universe]
+# Phase-4 recommendation: start at NIFTY 200 + sector indices, widen after load tests.
+indices = ["NSE:NIFTY 50", "NSE:NIFTY NEXT 50", "NSE:NIFTY 100", "NSE:NIFTY 200",
+           "NSE:NIFTY BANK", "NSE:NIFTY FINANCIAL SERVICES", "BSE:SENSEX"]
+sectors = ["all"]
+extra_symbols = []
+min_adv_value_cr = 25.0
+max_instruments = 1500
+
+[execution]
+mode = "paper"          # the only accepted value
+
+[risk]
+equity_rupees = 500000
+risk_per_trade_pct = 0.5
+risk_high_tier_pct = 0.75
+max_daily_loss_pct = 2.0
+max_open_positions = 6
+max_aggregate_open_risk_pct = 3.0
+max_risk_per_sector_pct = 1.5
+max_risk_per_underlying_pct = 1.0
+max_correlated_cluster_pct = 1.5
+max_overnight_risk_pct = 1.5
+max_positions_per_strategy = 3
+
+[paths]
+app_db = "data_store/app.db"
+market_db = "data_store/market.db"
+legacy_db = "journal.db"

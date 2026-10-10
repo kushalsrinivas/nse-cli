@@ -22,3 +22,4 @@ model/learned_weights.json
 # Local media / promo artifacts (never push)
 brag-output/
 reports/
+data_store/
