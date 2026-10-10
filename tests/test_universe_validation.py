@@ -5,7 +5,6 @@ fixtures use the published column layout and real ISINs.
 """
 
 import sys
-import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path

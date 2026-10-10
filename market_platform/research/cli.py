@@ -113,21 +113,30 @@ def cmd_backtest(args) -> int:
 
 
 def _print(console, r: dict) -> None:
-    dev = r["development"]
     console.print(f"[bold]development[/] ({r['sessions']['development']} sessions; holdout "
                   f"{r['sessions']['holdout']} sealed={r['holdout'] == 'sealed'}) · {r['survivorship']}")
-    console.print(f"  trades {dev.get('n')} · win {dev.get('win_rate')} · E[R] {dev.get('expectancy_r')} "
-                  f"CI {dev.get('expectancy_ci')} · net ₹{dev.get('net_pnl')} · DD "
-                  f"{dev.get('max_dd_pct')}% · Sharpe {dev.get('sharpe_daily')}")
+    u = r["underlying"]["development"]
+    console.print("[bold]UNDERLYING[/] (signal quality, R; candles only)")
+    console.print(f"  signals {u.get('n')} · win {u.get('win_rate')} · E[R] {u.get('expectancy_r')} "
+                  f"CI {u.get('expectancy_ci')} · max DD {u.get('max_dd_r')} R")
+    for k, v in r["underlying"]["by_direction_horizon"].items():
+        console.print(f"    {k:22} n={v.get('n')} E[R]={v.get('expectancy_r')} CI={v.get('expectancy_ci')}")
+    console.print("[bold]EXECUTED[/] (paper trades taken)")
+    for seg, v in r["executed"]["by_basis"].items():
+        console.print(f"  {seg:8} n={v.get('n')} net ₹{v.get('net_pnl')} E[R]={v.get('expectancy_r')}  "
+                      f"[dim]{v['basis']}[/]")
+    oc = r["options_coverage"]
+    console.print(f"  options archive coverage: {oc['priced_from_archive']}/{oc['option_route_decisions']} "
+                  f"option-route decisions priced ({oc['coverage']})")
     b = r.get("benchmark") or {}
     if b.get("available"):
         console.print(f"  NIFTY buy & hold {b['return_pct']}% (max DD {b.get('max_dd_pct')}%) vs "
-                      f"strategy {dev.get('return_pct')}%")
-    for k, v in (r["breakdowns"].get("direction_horizon") or {}).items():
-        console.print(f"  {k:22} {v}")
+                      f"executed {r['executed']['all'].get('return_pct')}%")
     for g in r["gates"]:
         mark = "[green]PASS[/]" if g["promotable_after_shadow"] else "[red]not promotable[/]"
-        console.print(f"  gate {g['pipeline']}/{g['horizon']}: A={g['gate_a']} B={g['gate_b']} {mark}")
+        opt = "options assessable" if g["options_basis"]["assessable"] else "options NOT ASSESSABLE"
+        console.print(f"  gate {g['pipeline']}/{g['horizon']}: A(underlying)={g['gate_a']} "
+                      f"B(executed)={g['gate_b']} · {opt} {mark}")
     console.print(f"  signals: {r['signals']}")
 
 

@@ -11,10 +11,18 @@ everything that judges use the development part only. `unseal=True`
 reports the holdout and records that it was viewed in the run's notes.
 
 Gates (pre-registered in conf/promotion.toml, per pipeline and horizon):
-    A  underlying/strategy edge: enough trades, expectancy CI lower bound > 0,
+Results are kept on separate bases and labelled:
+    UNDERLYING  every QUALIFIED signal walked on its own 1m bars (research/underlying.py)
+                — needs only candles; measures signal quality in R
+    EXECUTED    paper trades actually taken, split CASH / FUTURES (modelled from the
+                underlying) / OPTIONS (archived real quotes only)
+Option P&L is "NOT ASSESSABLE" until the quote archive covers ≥ 70% of option-route
+decisions and enough trades; history before quotes were archived cannot show it.
+
+    A  underlying/strategy edge (UNDERLYING basis): enough signals, expectancy CI lower bound > 0,
        ≥ min share of walk-forward folds positive, no single year carrying
        more than max_year_share of total R
-    B  economics: net ₹ after costs > 0 and costs ≤ max_cost_share of gross
+    B  economics (EXECUTED basis): net ₹ after costs > 0 and costs ≤ max_cost_share of gross
 A pipeline is promotable only when A and B pass on development data, and
 then only after the shadow (paper) period in the promotion file.
 """
@@ -166,7 +174,7 @@ def _small(ts: list[dict]) -> dict:
     r = [t["r_multiple"] or 0 for t in closed]
     return {"n": len(closed), "mean_r": round(float(np.mean(r)), 4),
             "win_rate": round(float(np.mean([x > 0 for x in r])), 3),
-            "net_pnl": round(sum(t["net_pnl"] or 0 for t in closed), 2)}
+            "net_pnl": round(sum(t.get("net_pnl") or 0 for t in closed), 2)}
 
 
 def split_sessions(sessions: list[str], holdout_frac: float) -> tuple[list[str], list[str]]:
@@ -225,19 +233,69 @@ def load_promotion(path: Path = PROMOTION_FILE) -> dict:
         return tomllib.load(fh)
 
 
-def gates(trades: list[dict], sessions: list[str], *, pipeline: str, horizon: str,
-          promo: dict, block: int, equity: float) -> dict:
-    sub = [t for t in trades if t["direction"] == pipeline and t["horizon"] == horizon]
-    closed = [t for t in sub if t.get("status") == "CLOSED"]
+BASIS_LABEL = {
+    "equity": "CASH — fills from 1m bars (slippage model), real cash-segment costs",
+    "futures": "FUTURES — modelled: underlying price + the basis observed at entry; real futures costs",
+    "options": "OPTIONS — priced only from archived real quotes; nothing synthetic",
+}
+MIN_OPTION_TRADES = {"intraday": 100, "overnight": 40}
+MIN_OPTION_COVERAGE = 0.70
+
+
+def r_metrics(trades: list[dict], sessions: list[str], *, block: int = 5) -> dict:
+    """R-only statistics (no rupees): for the underlying basis."""
+    if not trades:
+        return {"n": 0}
+    r = np.array([t["r_multiple"] for t in trades])
+    daily, _ = session_arrays(trades, sessions)
+    eq = np.cumsum(daily)
+    peak = np.maximum.accumulate(np.concatenate([[0.0], eq]))[1:]
+    point, lo, hi = expectancy_ci(trades, sessions, block=block)
+    by_year = defaultdict(float)
+    for t in trades:
+        by_year[t["session"][:4]] += t["r_multiple"]
+    total = float(r.sum())
+    reasons = defaultdict(int)
+    for t in trades:
+        reasons[t.get("exit_reason") or "?"] += 1
+    return {"n": len(trades), "win_rate": round(float((r > 0).mean()), 4),
+            "expectancy_r": point, "expectancy_ci": [lo, hi], "total_r": round(total, 3),
+            "max_dd_r": round(float((eq - peak).min()), 3) if len(eq) else 0.0,
+            "by_year_r": {k: round(v, 3) for k, v in sorted(by_year.items())},
+            "max_year_share": round(max(by_year.values()) / total, 3) if total > 0 else None,
+            "exit_reasons": dict(reasons)}
+
+
+def options_coverage(app_conn, run_id: str) -> dict:
+    """Option-route decisions: how many could be priced from archived quotes."""
+    priced = unevaluable = 0
+    for codes, stress in app_conn.execute(
+            "SELECT reason_codes, stress_json FROM risk_decisions WHERE run_id=? AND route IN "
+            "('ce','pe')", (run_id,)):
+        pricing = (json.loads(stress or "{}") or {}).get("pricing") or {}
+        if pricing.get("status") in ("OK", "NO_EDGE"):
+            priced += 1
+        elif "OPTIONS_UNEVALUABLE" in (codes or ""):
+            unevaluable += 1
+    n = priced + unevaluable
+    return {"option_route_decisions": n, "priced_from_archive": priced, "unevaluable": unevaluable,
+            "coverage": round(priced / n, 3) if n else None}
+
+
+def gates(underlying: list[dict], executed: list[dict], sessions: list[str], *, pipeline: str,
+          horizon: str, promo: dict, block: int, equity: float, opt_cov: dict) -> dict:
+    """Gate A on the UNDERLYING basis; Gate B on EXECUTED paper trades, with
+    the options basis judged only when the archive covers it."""
     ga, gb = promo["gate_a"], promo["gate_b"]
-    m = metrics(sub, sessions, equity=equity, block=block)
+    u = [t for t in underlying if t["direction"] == pipeline and t["horizon"] == horizon]
+    m = r_metrics(u, sessions, block=block)
     checks_a = []
     need = ga["min_trades"][horizon]
-    checks_a.append(("sample size", len(closed) >= need, f"{len(closed)} trades (need {need})"))
+    checks_a.append(("sample size (underlying)", len(u) >= need, f"{len(u)} signals (need {need})"))
     lo = (m.get("expectancy_ci") or [None])[0]
-    checks_a.append(("expectancy CI > 0", lo is not None and lo > 0,
+    checks_a.append(("expectancy CI > 0 (underlying R)", lo is not None and lo > 0,
                      f"{m.get('expectancy_r')} R, CI {m.get('expectancy_ci')}"))
-    wf = walk_forward(sub, sessions, folds=ga["folds"])
+    wf = walk_forward(u, sessions, folds=ga["folds"])
     pos = [f for f in wf if f.get("n")]
     frac = sum(1 for f in pos if f["mean_r"] > 0) / len(pos) if pos else 0.0
     checks_a.append(("walk-forward folds positive", frac >= ga["min_positive_folds"],
@@ -245,14 +303,26 @@ def gates(trades: list[dict], sessions: list[str], *, pipeline: str, horizon: st
     share = m.get("max_year_share")
     checks_a.append(("no single year dominates", share is None or share <= ga["max_year_share"],
                      f"max year share {share}"))
-    checks_b = [("net ₹ after costs > 0", (m.get("net_pnl") or 0) > 0, f"₹{m.get('net_pnl')}")]
-    cs = m.get("cost_share_of_gross")
+    ex = [t for t in executed if t["direction"] == pipeline and t["horizon"] == horizon]
+    em = metrics(ex, sessions, equity=equity, block=block)
+    checks_b = [("net ₹ after costs > 0 (executed paper)", (em.get("net_pnl") or 0) > 0,
+                 f"₹{em.get('net_pnl')} over {em.get('n', 0)} trades")]
+    cs = em.get("cost_share_of_gross")
     checks_b.append(("costs within budget", cs is not None and cs <= gb["max_cost_share"],
                      f"costs {cs} of gross profit (max {gb['max_cost_share']})"))
+    opt = [t for t in ex if t.get("segment") == "options"]
+    cov = opt_cov.get("coverage")
+    assessable = bool(opt) and cov is not None and cov >= MIN_OPTION_COVERAGE \
+        and len(opt) >= MIN_OPTION_TRADES[horizon]
+    options = {"trades": len(opt), "archive_coverage": cov, "assessable": assessable,
+               "note": None if assessable else
+               "NOT ASSESSABLE — options P&L needs archived quotes for ≥ "
+               f"{MIN_OPTION_COVERAGE:.0%} of option-route decisions and ≥ {MIN_OPTION_TRADES[horizon]} "
+               "trades; record quotes first (they are archived from the first live/paper session)"}
     pa = all(p for _, p, _ in checks_a)
     pb = all(p for _, p, _ in checks_b)
     return {"pipeline": pipeline, "horizon": horizon, "gate_a": pa, "gate_b": pb,
-            "promotable_after_shadow": pa and pb,
+            "promotable_after_shadow": pa and pb, "options_basis": options,
             "shadow_sessions_required": promo["shadow"]["min_sessions"],
             "checks": [{"gate": "A", "name": n, "pass": p, "detail": d} for n, p, d in checks_a]
             + [{"gate": "B", "name": n, "pass": p, "detail": d} for n, p, d in checks_b],
@@ -261,15 +331,26 @@ def gates(trades: list[dict], sessions: list[str], *, pipeline: str, horizon: st
 
 def build(app_conn, market_conn, cfg, run_id: str, *, instruments: dict | None = None,
           unseal: bool = False, benchmark_key: str = "NSE:NIFTY 50") -> dict:
+    from market_platform.research.underlying import BASIS, underlying_trades
     run = dict(app_conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone() or {})
     trades = trades_for_run(app_conn, run_id)
     sessions = sorted({r[0] for r in app_conn.execute(
         "SELECT DISTINCT session FROM signals WHERE run_id=?", (run_id,))} | {t["session"] for t in trades})
     dev, hold = split_sessions(sessions, cfg.backtest.holdout_frac)
-    dev_trades = [t for t in trades if not hold or t["session"] < hold[0]]
+    def in_dev(t: dict) -> bool:
+        return not hold or t["session"] < hold[0]
+
+    dev_trades = [t for t in trades if in_dev(t)]
+    und = underlying_trades(app_conn, market_conn, cfg, run_id, instruments=instruments)
+    dev_und = [t for t in und if in_dev(t)]
     eq = cfg.risk.equity_rupees
     block = cfg.backtest.block_sessions
     promo = load_promotion()
+    opt_cov = options_coverage(app_conn, run_id)
+    by_basis = {}
+    for seg, label in BASIS_LABEL.items():
+        sub = [t for t in dev_trades if t["segment"] == seg]
+        by_basis[seg] = {"basis": label, **metrics(sub, dev, equity=eq, block=block)}
     out = {
         "run": run, "generated_at": datetime.now().isoformat(timespec="seconds"),
         "survivorship": "SURVIVORSHIP_BIASED" if "SURVIVORSHIP_BIASED" in (run.get("notes") or "")
@@ -277,17 +358,29 @@ def build(app_conn, market_conn, cfg, run_id: str, *, instruments: dict | None =
         "sessions": {"all": len(sessions), "development": len(dev), "holdout": len(hold),
                      "holdout_from": hold[0] if hold else None},
         "signals": _signal_counts(app_conn, run_id),
+        "underlying": {"basis": BASIS, "development": r_metrics(dev_und, dev, block=block),
+                       "by_direction_horizon": {
+                           f"{d}/{h}": r_metrics([t for t in dev_und if t["direction"] == d
+                                                  and t["horizon"] == h], dev, block=block)
+                           for d in ("bullish", "bearish") for h in ("intraday", "overnight")}},
+        "executed": {"note": "paper trades actually taken (governor, sizing, fills, costs); "
+                             "each basis is reported separately",
+                     "all": metrics(dev_trades, dev, equity=eq, block=block), "by_basis": by_basis},
+        "options_coverage": opt_cov,
         "development": metrics(dev_trades, dev, equity=eq, block=block),
         "breakdowns": breakdowns(dev_trades, dev, equity=eq, instruments=instruments),
         "walk_forward": walk_forward(dev_trades, dev, folds=promo["gate_a"]["folds"]),
         "benchmark": benchmark(market_conn, dev, benchmark_key),
-        "gates": [gates(dev_trades, dev, pipeline=p, horizon=h, promo=promo, block=block, equity=eq)
+        "gates": [gates(dev_und, dev_trades, dev, pipeline=p, horizon=h, promo=promo, block=block,
+                        equity=eq, opt_cov=opt_cov)
                   for p in ("bullish", "bearish") for h in ("intraday", "overnight")],
         "holdout": "sealed" if hold and not unseal else None,
     }
     if hold and unseal:
         ht = [t for t in trades if t["session"] >= hold[0]]
-        out["holdout"] = metrics(ht, hold, equity=eq, block=block)
+        out["holdout"] = {"executed": metrics(ht, hold, equity=eq, block=block),
+                          "underlying": r_metrics([t for t in und if t["session"] >= hold[0]], hold,
+                                                  block=block)}
         app_conn.execute("UPDATE runs SET notes=notes || ? WHERE run_id=?",
                          (f" | holdout viewed {datetime.now().isoformat(timespec='seconds')}", run_id))
         app_conn.commit()

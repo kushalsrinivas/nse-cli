@@ -144,6 +144,40 @@ class TestReplay(unittest.TestCase):
         self.assertIn("platform_all", out)
 
 
+class TestUnderlyingVsOptions(unittest.TestCase):
+    def test_bases_are_separate_and_labelled(self):
+        from market_platform.research import report as rep
+        from market_platform.research.underlying import (
+            pre_risk_status,
+            underlying_trades,
+        )
+        res, d = replay(label="bases")
+        cfg, _ = market_with_bars()
+        und = underlying_trades(d.app, d.market, cfg, res.run_id,
+                                instruments={i["instrument_key"]: i for i in instruments()})
+        first = pre_risk_status(d.app, res.run_id)
+        qualified = [k for k, v in first.items() if v == "QUALIFIED"]
+        self.assertGreater(len(und), 0)
+        self.assertLessEqual(len(und), len(qualified))
+        self.assertTrue({t["signal_id"] for t in und} <= set(qualified))
+        for t in und:                                     # entry never before availability
+            av = d.app.execute("SELECT available_at FROM signals WHERE run_id=? AND signal_id=?",
+                               (res.run_id, t["signal_id"])).fetchone()[0]
+            self.assertGreaterEqual(t["entry_ts"], av)
+        r = rep.build(d.app, d.market, cfg, res.run_id,
+                      instruments={i["instrument_key"]: i for i in instruments()})
+        self.assertIn("UNDERLYING", r["underlying"]["basis"])
+        self.assertEqual(set(r["executed"]["by_basis"]), {"equity", "futures", "options"})
+        self.assertIn("archived real quotes", r["executed"]["by_basis"]["options"]["basis"])
+        cov = r["options_coverage"]
+        self.assertGreater(cov["option_route_decisions"], 0)    # NIFTY routes to options
+        self.assertEqual(cov["priced_from_archive"], 0)          # nothing archived in this window
+        for g in r["gates"]:
+            self.assertFalse(g["options_basis"]["assessable"])
+            self.assertIn("NOT ASSESSABLE", g["options_basis"]["note"])
+            self.assertTrue(g["checks"][0]["name"].endswith("(underlying)"))
+
+
 class TestReplayVariants(unittest.TestCase):
     def test_bullish_only_trades_bullish_but_records_bearish_views(self):
         res, d = replay(("bullish",), label="bull-only")
