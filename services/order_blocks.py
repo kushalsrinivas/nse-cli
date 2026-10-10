@@ -806,7 +806,8 @@ def recorder_book(recorder, clock=datetime.now):
 
 
 def run_paper(*, minutes: float = 375, events: list[str] | None = None, laya=None,
-              laya_enforce: bool = False, warmup_days: int = 30, on_status=None) -> dict:
+              laya_enforce: bool = False, warmup_days: int = 30, on_status=None,
+              allow_dirty: bool = False) -> dict:
     """Blocking live paper session. Requires a Kite session. Never places
     a real order: execution is PaperBroker only."""
     import asyncio
@@ -834,6 +835,14 @@ def run_paper(*, minutes: float = 375, events: list[str] | None = None, laya=Non
     now = datetime.now()
 
     run_backfill(days=warmup_days, rest=rest, store=store, archive=archive, now=now)
+    from services.data_quality import run_quality
+    quality = run_quality("paper", frm=(now - timedelta(days=5)).strftime("%Y-%m-%d"),
+                          to=now.strftime("%Y-%m-%d"), archive=archive, store=store,
+                          journal=journal, now=now)
+    if not quality.ok and not allow_dirty:
+        raise RuntimeError("data quality CRITICAL — paper session not started "
+                           f"(report: {quality.report_path}): "
+                           + "; ".join(f"{c.key} {c.value}" for c in quality.critical))
     bars = load_bars(archive, (now - timedelta(days=warmup_days)).strftime("%Y-%m-%d 00:00"),
                      now.strftime("%Y-%m-%d %H:%M"))
 
@@ -955,6 +964,7 @@ class BacktestOutcome:
     summary: dict
     grid_rows: list = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
+    quality: object = None
 
 
 def vix_level(value) -> float | None:
@@ -1008,7 +1018,7 @@ def run_backtest(*, frm: str, to: str, params: ObParams | None = None,
                  archive=None, store=None, journal: ObJournal | None = None,
                  vix_by_date: dict[str, float] | None = None, horizon: str = "both",
                  holdout_frac: float = 0.2, unseal_holdout: bool = False,
-                 with_sensitivity: bool = False) -> BacktestOutcome:
+                 with_sensitivity: bool = False, allow_dirty: bool = False) -> BacktestOutcome:
     """Chronological backtest with a sealed final holdout.
 
     Gates, grid, sensitivity and calibration see only the development
@@ -1024,6 +1034,15 @@ def run_backtest(*, frm: str, to: str, params: ObParams | None = None,
     journal = journal or ObJournal()
     horizons = ("intraday", "overnight") if horizon == "both" else (horizon,)
     out = BacktestOutcome(run_id="BT-" + datetime.now().strftime("%Y%m%d-%H%M%S"), summary={})
+    from services.data_quality import run_quality
+    out.quality = run_quality("backtest", frm=frm, to=to, archive=archive,
+                              store=store if store is not None else None, journal=journal)
+    if not out.quality.ok and not allow_dirty:
+        out.notices.append("data quality CRITICAL — backtest not run "
+                           f"(report: {out.quality.report_path}): "
+                           + "; ".join(f"{c.key} {c.value}" + (f" ({c.detail})" if c.detail else "")
+                                       for c in out.quality.critical))
+        return out
     bars = load_bars(archive, f"{frm} 00:00", f"{to} 23:59")
     if not bars:
         out.notices.append("no archived bars in range — run ob-backfill first")
@@ -1105,6 +1124,15 @@ def run_backtest(*, frm: str, to: str, params: ObParams | None = None,
                                sensitivity=sensitivity, vix_by_date=vix, expiries=expiries,
                                holdout=shown, holdout_note=note)
     out.summary["horizons_run"] = list(horizons)
+    out.summary["data_quality"] = {"ok": out.quality.ok, "report": out.quality.report_path,
+                                   "blocking": [f"{c.key}: {c.value}" for c in out.quality.critical],
+                                   "warnings": [f"{c.key}: {c.value}" for c in out.quality.warnings]}
+    if not out.quality.ok:
+        # --allow-dirty: results are shown but can never promote anything.
+        for block in out.summary["horizons"].values():
+            block["promoted"] = False
+            block["verdict"]["promoted"] = False
+        out.notices.append("ran on DIRTY inputs (--allow-dirty): nothing can be promoted")
     out.summary["cost_points"] = cp
     out.summary["range"] = [frm, to]
     out.grid_rows = out.grid_rows or []

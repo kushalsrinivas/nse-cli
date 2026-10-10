@@ -39,6 +39,27 @@ def cmd_ob_audit(args) -> int:
         with open(args.out, "w") as fh:
             fh.write(report.to_markdown())
         console.print(f"[dim]wrote {args.out}[/]")
+
+    from datetime import date, timedelta
+
+    from data.kite.archive import MarketArchive
+    from journal.ob_db import ObJournal
+    from services.data_quality import run_quality
+    to = date.today().isoformat()
+    frm = (date.today() - timedelta(days=args.days)).isoformat()
+    quality = run_quality("audit", frm=frm, to=to, archive=MarketArchive(), journal=ObJournal())
+    console.print(f"data quality: {'[green]OK[/]' if quality.ok else '[red]CRITICAL[/]'} · "
+                  f"{len(quality.critical)} critical · {len(quality.warnings)} warnings · "
+                  f"report {quality.report_path} (details: model_cli.py ob-quality)")
+    if args.json:
+        import json
+        from dataclasses import asdict
+        with open(args.json, "w") as fh:
+            json.dump({"findings": [asdict(f) for f in report.findings],
+                       "quality": quality.to_dict()}, fh, indent=2)
+        console.print(f"[dim]wrote {args.json}[/]")
+    if not quality.ok:
+        return quality.exit_code
     return 1 if report.failures else 0
 
 
@@ -88,6 +109,34 @@ def cmd_ob_record(args) -> int:
     return 0
 
 
+def cmd_ob_quality(args) -> int:
+    import json
+    from datetime import date, timedelta
+
+    from data.kite.archive import MarketArchive
+    from journal.ob_db import ObJournal
+    from services.data_quality import run_quality
+
+    to = args.to or date.today().isoformat()
+    frm = args.frm or (date.fromisoformat(to) - timedelta(days=args.days)).isoformat()
+    rep = run_quality(args.scope, frm=frm, to=to, archive=MarketArchive(), journal=ObJournal())
+    table = Table(title=f"Data quality ({args.scope}) {frm} → {to}")
+    for col in ("Check", "Severity", "OK", "Value", "Detail"):
+        table.add_column(col, overflow="fold")
+    for c in rep.checks:
+        sev = {"CRITICAL": "red", "WARN": "yellow"}.get(c.severity, "dim")
+        table.add_row(c.key, f"[{sev}]{c.severity}[/]", "[green]yes[/]" if c.passed else "[red]no[/]",
+                      c.value, c.detail)
+    console.print(table)
+    console.print(f"[dim]report: {rep.report_path}[/]")
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(rep.to_dict(), fh, indent=2)
+    if not rep.ok:
+        console.print(f"[red]{len(rep.critical)} CRITICAL failure(s) — exit {rep.exit_code}[/]")
+    return rep.exit_code
+
+
 def cmd_ob_coverage(args) -> int:
     from data.kite.archive import MarketArchive
     from journal.ob_db import ObJournal
@@ -122,6 +171,7 @@ def register(sub) -> dict:
     """Add OB subparsers to model_cli's subparser set; return cmd map."""
     au = sub.add_parser("ob-audit", help="order-block data-availability report (Kite)")
     au.add_argument("--days", type=int, default=30, help="coverage window (default 30)")
+    au.add_argument("--json", default=None, help="machine-readable findings + quality report")
     au.add_argument("--out", default=None,
                     help="also write Markdown, e.g. docs/ORDER_BLOCKS_DATA_AUDIT.md")
 
@@ -139,11 +189,19 @@ def register(sub) -> dict:
                     help="quote snapshot interval in seconds (default 60)")
     rc.add_argument("--verbose", action="store_true")
 
+    q = sub.add_parser("ob-quality", help="data-quality gate (JSON report; exit 3 on CRITICAL)")
+    q.add_argument("--scope", default="audit", choices=("audit", "backtest", "paper"))
+    q.add_argument("--days", type=int, default=30)
+    q.add_argument("--from", dest="frm", default=None)
+    q.add_argument("--to", default=None)
+    q.add_argument("--json", default=None, help="also write the report here")
+
     cv = sub.add_parser("ob-coverage", help="per-session option quote coverage (exit 1 on gaps)")
     cv.add_argument("--days", type=int, default=10)
 
     cmds = {
         "ob-coverage": cmd_ob_coverage,
+        "ob-quality": cmd_ob_quality,
         "ob-audit": cmd_ob_audit,
         "ob-backfill": cmd_ob_backfill,
         "ob-record": cmd_ob_record,
@@ -206,7 +264,7 @@ def cmd_ob_paper(args) -> int:
     try:
         out = run_paper(minutes=args.minutes, events=args.event, laya=_laya(args),
                         laya_enforce=args.laya_enforce, warmup_days=args.warmup_days,
-                        on_status=_status)
+                        on_status=_status, allow_dirty=args.allow_dirty)
     except (KiteAuthError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/]")
         return 1
@@ -257,9 +315,11 @@ def cmd_ob_backtest(args) -> int:
                        with_grid=args.grid, options=not args.no_options,
                        persist_trades=not args.no_persist, horizon=args.horizon,
                        holdout_frac=args.holdout, unseal_holdout=args.unseal_holdout,
-                       with_sensitivity=args.sensitivity)
+                       with_sensitivity=args.sensitivity, allow_dirty=args.allow_dirty)
     for n in out.notices:
         console.print(f"[yellow]{n}[/]")
+    if out.quality is not None and not out.quality.ok and not args.allow_dirty:
+        return out.quality.exit_code
     if not out.summary:
         return 1
     console.print(f"[bold]{out.run_id}[/] {frm} → {to} · {out.summary.get('sessions')} sessions "
@@ -305,6 +365,8 @@ def _register_trading(sub) -> dict:
     pp.add_argument("--laya", action="store_true")
     pp.add_argument("--laya-enforce", action="store_true")
     pp.add_argument("--verbose", action="store_true")
+    pp.add_argument("--allow-dirty", action="store_true",
+                    help="start despite CRITICAL data-quality failures")
 
     oj = sub.add_parser("ob-journal", help="order-block signals and paper positions")
     oj.add_argument("--decision", default=None, choices=("GO", "WATCH", "NO-GO", "SHADOW"))
@@ -332,6 +394,8 @@ def _register_trading(sub) -> dict:
                     help="final fraction of sessions kept sealed (default 0.2; 0 disables)")
     bt.add_argument("--unseal-holdout", action="store_true",
                     help="report the sealed holdout (logged; repeated views are flagged)")
+    bt.add_argument("--allow-dirty", action="store_true",
+                    help="run despite CRITICAL data-quality failures (never promotes)")
     bt.add_argument("--sensitivity", action="store_true",
                     help="one-at-a-time parameter sensitivity on development sessions")
 
