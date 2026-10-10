@@ -59,7 +59,8 @@ CREATE INDEX IF NOT EXISTS idx_kih_symbol
     ON kite_instrument_history(exchange, tradingsymbol, as_of);
 """
 
-#: Underlyings whose master rows are versioned in kite_instrument_history.
+#: Underlyings whose option rows are versioned in kite_instrument_history
+#: (all NFO/BFO futures are versioned regardless — see tracks_history).
 HISTORY_UNDERLYINGS = ("NIFTY",)
 #: NSE index rows versioned alongside (the spot token can change too).
 HISTORY_INDEX_SYMBOLS = ("NIFTY 50", "INDIA VIX")
@@ -72,8 +73,13 @@ def tracks_history(r: InstrumentRow) -> bool:
     """True for rows kite_instrument_history should version."""
     if r.exchange == "NSE":
         return r.tradingsymbol in HISTORY_INDEX_SYMBOLS
-    if r.exchange != "NFO":
+    if r.exchange not in ("NFO", "BFO"):
         return False
+    if r.instrument_type == "FUT":
+        # Every future is versioned: futures and options of an underlying
+        # share a lot, so the front future gives the lot on any past date
+        # for stocks and indices alike (a few hundred rows per month).
+        return True
     for u in HISTORY_UNDERLYINGS:
         rest = r.tradingsymbol[len(u):len(u) + 1]
         if r.tradingsymbol.startswith(u) and rest.isdigit():
@@ -225,15 +231,16 @@ class InstrumentStore:
             instrument_type=row["instrument_type"], segment="",
             as_of=row["as_of"])
 
-    def history_front_future(self, underlying: str, date: str) -> InstrumentRow | None:
+    def history_front_future(self, underlying: str, date: str,
+                             exchange: str = "NFO") -> InstrumentRow | None:
         """The nearest-expiry future of `underlying` live on `date`, with the
         attributes known on that date (latest version with as_of <= date)."""
         rows = self.conn.execute(
-            "SELECT h.* FROM kite_instrument_history h WHERE h.exchange='NFO' "
+            "SELECT h.* FROM kite_instrument_history h WHERE h.exchange=? "
             "AND h.instrument_type='FUT' AND h.expiry>=? AND h.as_of<=? "
             "AND h.as_of = (SELECT MAX(as_of) FROM kite_instrument_history x "
             "  WHERE x.exchange=h.exchange AND x.tradingsymbol=h.tradingsymbol AND x.as_of<=?) "
-            "ORDER BY h.expiry", (date, date, date)).fetchall()
+            "ORDER BY h.expiry", (exchange, date, date, date)).fetchall()
         for row in rows:
             sym = row["tradingsymbol"]
             if sym.startswith(underlying) and sym[len(underlying):len(underlying) + 1].isdigit():

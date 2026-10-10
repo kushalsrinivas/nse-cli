@@ -19,6 +19,7 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 
+from config import SETTINGS
 from data import nifty
 from model.magnitude import compute_distribution
 from model.options_ev import (
@@ -35,7 +36,7 @@ from model.overnight import (
 console = Console()
 SPOT = 24000.0
 BASE_IV = 14.0
-LOT_SIZE = 75
+LOT_SIZE = SETTINGS.lot_size      # checked against the contract master by data/lots.py
 
 
 def score_bin_study(signals: list) -> None:

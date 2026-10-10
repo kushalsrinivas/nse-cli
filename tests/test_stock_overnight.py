@@ -2,12 +2,13 @@
 
 Covers: lot map completeness, index/equity chain routing, exact-expiry
 discipline, runner structure + skip paths, and the separate stock journal
-(add/list/settle/perf). Synthetic data only, except the lot snapshot which
-is pinned in `data/equity_lots.py`.
+(add/list/settle/perf). Synthetic data only; lots come from a fixture
+contract master.
 """
 
 import sys
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -20,24 +21,43 @@ from analysis.signals import Direction
 
 
 class TestEquityLots(unittest.TestCase):
+    """Lots come from the Kite contract master (no pinned table)."""
+
+    def _store(self):
+        import os
+        import tempfile
+
+        from data.kite.store import InstrumentStore, normalize_dump_row
+        from model.breadth.universe import _UNIVERSE
+        st = InstrumentStore(os.path.join(tempfile.mkdtemp(), "j.db"))
+        rows = [{"instrument_token": 5000 + i, "exchange": "NFO",
+                 "tradingsymbol": f"{c.short}26OCTFUT", "name": c.short,
+                 "expiry": "2099-10-27", "strike": None, "tick_size": 0.05,
+                 "lot_size": 100 + i, "instrument_type": "FUT", "segment": "NFO-FUT"}
+                for i, c in enumerate(_UNIVERSE)]
+        st.upsert([normalize_dump_row(r, "2026-10-06") for r in rows])
+        return st
+
     def test_universe_fully_covered(self):
         from data.equity_lots import lot_for
-        from model.breadth.universe import get_universe
-        shorts = [c.short for c in get_universe()]
+        from model.breadth.universe import _UNIVERSE
+        st = self._store()
+        shorts = [c.short for c in _UNIVERSE]
         self.assertEqual(len(shorts), 50)
         for s in shorts:
-            lot = lot_for(s)
+            lot = lot_for(s, store=st)
             self.assertIsInstance(lot, int)
             self.assertGreater(lot, 0)
 
     def test_yahoo_suffix_accepted(self):
         from data.equity_lots import lot_for
-        self.assertEqual(lot_for("RELIANCE.NS"), lot_for("RELIANCE"))
+        st = self._store()
+        self.assertEqual(lot_for("RELIANCE.NS", store=st), lot_for("RELIANCE", store=st))
 
     def test_unknown_raises(self):
         from data.equity_lots import lot_for
         with self.assertRaises(KeyError):
-            lot_for("NOPE")
+            lot_for("NOPE", store=self._store())
 
 
 class TestChainKind(unittest.TestCase):
@@ -119,6 +139,7 @@ class TestStockRunner(unittest.TestCase):
         self.assertEqual(r.decision, "ERROR")
         self.assertIn("no lot size", r.error)
 
+    @unittest.mock.patch("model.stock_overnight.lot_for", lambda s: 500)
     def test_short_history_skips(self):
         from data.constituents import ConstituentBundle
         from model.stock_overnight import evaluate_stock
@@ -129,6 +150,7 @@ class TestStockRunner(unittest.TestCase):
         self.assertEqual(r.decision, "SKIPPED")
         self.assertIn("insufficient history", r.error)
 
+    @unittest.mock.patch("model.stock_overnight.lot_for", lambda s: 500)
     def test_full_run_structure(self):
         from data.constituents import ConstituentBundle
         from model.stock_overnight import evaluate_stock

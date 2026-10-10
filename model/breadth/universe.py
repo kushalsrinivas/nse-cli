@@ -15,11 +15,22 @@ Refresh checklist (quarterly): re-pull the NSE CSV, update weights from
 the latest factsheet, verify every Yahoo symbol still resolves. If a
 symbol fails, the fetcher marks it missing and proceeds on weight
 coverage, so a stale list degrades gracefully instead of crashing.
+
+Membership is now dynamic: when the platform universe (data_store/app.db,
+`platform_cli.py universe refresh`) holds a current NIFTY 50 membership,
+`get_universe()` returns *that* list. The table below then only supplies
+weight and sector priors; names it does not know get the median weight and
+their NSE Industry as sector. Without a platform snapshot the table is
+used as before.
 """
 
 from __future__ import annotations
 
+import os
+import sqlite3
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -93,17 +104,47 @@ MIN_WEIGHT_COVERAGE = 0.70
 MIN_NAMES_COVERED = 35
 
 
+PLATFORM_APP_DB = Path(__file__).resolve().parents[2] / "data_store" / "app.db"
+
+
+@lru_cache(maxsize=1)
+def _platform_members() -> tuple[Constituent, ...] | None:
+    """Current NIFTY 50 membership from the platform universe, or None."""
+    path = Path(os.environ.get("NSE_PLATFORM_APP_DB", PLATFORM_APP_DB))
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT m.symbol, c.industry FROM index_membership m LEFT JOIN companies c "
+            "ON c.isin=m.isin WHERE m.index_id='NSE:NIFTY 50' AND m.valid_to IS NULL").fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return None
+    if len(rows) < MIN_NAMES_COVERED:
+        return None
+    prior = {c.short: c for c in _UNIVERSE}
+    ws = sorted(c.weight for c in _UNIVERSE)
+    median = ws[len(ws) // 2]
+    out = []
+    for sym, industry in sorted(rows):
+        p = prior.get(sym)
+        out.append(Constituent(f"{sym}.NS", sym, p.weight if p else median,
+                               p.sector if p else (industry or "Other")))
+    return tuple(sorted(out, key=lambda c: -c.weight))
+
+
 def get_universe() -> tuple[Constituent, ...]:
-    return _UNIVERSE
+    return _platform_members() or _UNIVERSE
 
 
 def symbols() -> list[str]:
-    return [c.symbol for c in _UNIVERSE]
+    return [c.symbol for c in get_universe()]
 
 
 def weights_normalized(subset: list[str] | None = None) -> dict[str, float]:
     """Index weights normalized to sum to 1.0 over `subset` (or full universe)."""
-    members = [c for c in _UNIVERSE if subset is None or c.symbol in subset]
+    members = [c for c in get_universe() if subset is None or c.symbol in subset]
     total = sum(c.weight for c in members)
     if total <= 0:
         return {}
@@ -115,11 +156,11 @@ def full_weights_normalized() -> dict[str, float]:
 
 
 def heavyweights(top_n: int = 8) -> list[Constituent]:
-    return sorted(_UNIVERSE, key=lambda c: -c.weight)[:top_n]
+    return sorted(get_universe(), key=lambda c: -c.weight)[:top_n]
 
 
 def sectors() -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
-    for c in _UNIVERSE:
+    for c in get_universe():
         out.setdefault(c.sector, []).append(c.symbol)
     return out
